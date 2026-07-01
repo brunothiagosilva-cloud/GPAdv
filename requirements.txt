@@ -3,3 +3,5 @@ pandas
 supabase
 cryptography
 openai
+openpyxl
+xlsxwriter
