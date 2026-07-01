@@ -38,7 +38,7 @@ st.set_page_config(
 # ---------------- Inicialização do Supabase ----------------
 @st.cache_resource
 def init_connection() -> Client:
-    # Substitua pelas suas chaves reais do projeto no Brasil
+    # Substitua pelas suas chaves reais do projeto
     url = "https://cepzkxjdvtidonybkcte.supabase.co"
     key = "sb_publishable_287QhMSn5JrlsI8-0ut7uA_cfo-3MUe"
     return create_client(url, key)
@@ -46,7 +46,7 @@ def init_connection() -> Client:
 supabase = init_connection()
 
 # ---------------- Config & Paths Locais (E-mail/Cripto) ----------------
-APP_VERSION = "31.0 (Enterprise Auth, AI & Password Recovery)"
+APP_VERSION = "32.0 (Enterprise Auth, AI & OTP Recovery)"
 INSTALL_DIR = Path("C:/GerenciadorProcessos")
 DATA_DIR = INSTALL_DIR / "data"
 
@@ -169,6 +169,8 @@ if 'user_email' not in st.session_state:
     st.session_state['user_email'] = ""
 if 'perfil' not in st.session_state:
     st.session_state['perfil'] = ""
+if 'recovery_email' not in st.session_state:
+    st.session_state['recovery_email'] = None
 
 def login(email_input, password_input):
     try:
@@ -188,7 +190,7 @@ def login(email_input, password_input):
                 st.error("Acesso não autorizado para este e-mail. Solicite liberação ao administrador.")
                 supabase.auth.sign_out()
     except Exception as e:
-        st.error(f"Falha na autenticação: Verifique suas credenciais. (Erro: {e})")
+        st.error(f"Falha na autenticação: Verifique suas credenciais.")
 
 def signup(email_input, password_input):
     try:
@@ -200,13 +202,6 @@ def signup(email_input, password_input):
     except Exception as e:
         st.error(f"Falha ao realizar cadastro. (Erro: {e})")
 
-def reset_password(email_input):
-    try:
-        supabase.auth.reset_password_for_email(email_input)
-        st.success("Um e-mail com instruções de recuperação foi enviado. Verifique sua caixa de entrada (e pasta de spam).")
-    except Exception as e:
-        st.error(f"Erro ao solicitar recuperação: {e}")
-
 def logout():
     try:
         supabase.auth.sign_out()
@@ -215,6 +210,7 @@ def logout():
     st.session_state['authenticated'] = False
     st.session_state['user_email'] = ""
     st.session_state['perfil'] = ""
+    st.session_state['recovery_email'] = None
     st.rerun()
 
 # ---------------- Funções de Banco de Dados (Supabase) ----------------
@@ -401,15 +397,43 @@ if not st.session_state['authenticated']:
                         st.warning("Preencha um e-mail válido e uma senha com no mínimo 6 caracteres.")
                         
             with tab3:
-                st.markdown("Insira seu e-mail para receber um link de redefinição de senha.")
+                st.markdown("Insira seu e-mail para receber um código numérico de recuperação.")
                 rec_email = st.text_input("E-mail corporativo", key="rec_email")
                 
-                if st.button("Enviar E-mail de Recuperação", use_container_width=True):
+                if st.button("Enviar Código de Recuperação", use_container_width=True):
                     if rec_email:
-                        with st.spinner("Solicitando link seguro..."):
-                            reset_password(rec_email)
+                        with st.spinner("Solicitando código seguro..."):
+                            try:
+                                supabase.auth.reset_password_for_email(rec_email)
+                                st.session_state['recovery_email'] = rec_email 
+                                st.success("E-mail enviado! Verifique o código numérico na sua caixa de entrada (ou spam).")
+                            except Exception as e:
+                                st.error(f"Erro ao solicitar recuperação.")
                     else:
                         st.warning("Por favor, insira o seu e-mail de acesso.")
+                
+                if st.session_state.get('recovery_email'):
+                    st.divider()
+                    st.markdown("### 2. Criar Nova Senha")
+                    otp_code = st.text_input("Código de 6 dígitos recebido no e-mail", key="otp_code")
+                    new_pwd = st.text_input("Crie sua Nova Senha (mínimo 6 caracteres)", type="password", key="rec_new_pwd")
+                    
+                    if st.button("Confirmar Nova Senha", type="primary", use_container_width=True):
+                        if otp_code and len(new_pwd) >= 6:
+                            try:
+                                supabase.auth.verify_otp({
+                                    "email": st.session_state['recovery_email'], 
+                                    "token": otp_code, 
+                                    "type": "recovery"
+                                })
+                                supabase.auth.update_user({"password": new_pwd})
+                                supabase.auth.sign_out()
+                                st.session_state['recovery_email'] = None
+                                st.success("✅ Senha redefinida com sucesso! Volte para a aba 'Entrar'.")
+                            except Exception as e:
+                                st.error(f"Código inválido/expirado ou erro interno.")
+                        else:
+                            st.warning("Preencha o código e certifique-se de que a nova senha tem no mínimo 6 caracteres.")
 else:
     # TELA DO SISTEMA AUTENTICADO
     
@@ -580,7 +604,7 @@ else:
 
         with col_conf2:
             st.subheader("🔑 Alterar Minha Senha")
-            st.write("Caso você tenha usado a recuperação por link mágico ou deseje trocar sua credencial de acesso atual.")
+            st.write("Caso você deseje trocar sua credencial de acesso atual de forma manual.")
             with st.container(border=True):
                 nova_senha_update = st.text_input("Nova Senha de Acesso", type="password", key="new_pwd_update")
                 if st.button("Atualizar Senha", type="primary", use_container_width=True):
