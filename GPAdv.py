@@ -46,7 +46,7 @@ def init_connection() -> Client:
 supabase = init_connection()
 
 # ---------------- Config & Paths Locais (E-mail/Cripto) ----------------
-APP_VERSION = "30.0 (Enterprise Auth & AI)"
+APP_VERSION = "31.0 (Enterprise Auth, AI & Password Recovery)"
 INSTALL_DIR = Path("C:/GerenciadorProcessos")
 DATA_DIR = INSTALL_DIR / "data"
 
@@ -200,6 +200,13 @@ def signup(email_input, password_input):
     except Exception as e:
         st.error(f"Falha ao realizar cadastro. (Erro: {e})")
 
+def reset_password(email_input):
+    try:
+        supabase.auth.reset_password_for_email(email_input)
+        st.success("Um e-mail com instruções de recuperação foi enviado. Verifique sua caixa de entrada (e pasta de spam).")
+    except Exception as e:
+        st.error(f"Erro ao solicitar recuperação: {e}")
+
 def logout():
     try:
         supabase.auth.sign_out()
@@ -252,7 +259,6 @@ def import_from_excel(uploaded_file):
         
         registros_limpos = []
         for reg in registros:
-            # Formata automaticamente os CNJs vindos do Excel
             num_formatado = formatar_cnj(str(reg.get("numero", "")))
             registros_limpos.append({
                 "numero": num_formatado,
@@ -276,20 +282,18 @@ def import_from_excel(uploaded_file):
 
 # ---------------- Lógica de Negócios (Email & IA) ----------------
 def read_publications_from_email():
-    # Busca credenciais específicas do usuário logado no banco de dados
     try:
         res = supabase.table("configuracoes").select("*").eq("usuario_email", st.session_state['user_email']).execute()
         if res.data and res.data[0].get("imap_email") and res.data[0].get("imap_pwd"):
             imap_user = res.data[0]["imap_email"]
             imap_pwd = res.data[0]["imap_pwd"]
         else:
-            st.warning("Configure suas credenciais de e-mail na aba '⚙️ Configurações' antes de sincronizar publicações.")
+            st.warning("Configure suas credenciais de e-mail na aba '⚙️ Configurações Pessoais' antes de sincronizar publicações.")
             return
     except Exception as e:
         st.error(f"Erro ao buscar configurações de e-mail: {e}")
         return
 
-    # Usando servidor IMAP padrão do Gmail
     imap_host = "imap.gmail.com"
     imap_port = 993
 
@@ -364,14 +368,14 @@ def generate_piece(proc_num):
 # ==============================================================================
 
 if not st.session_state['authenticated']:
-    # TELA DE LOGIN / CADASTRO
+    # TELA DE LOGIN / CADASTRO / RECUPERAÇÃO
     st.markdown("<h1 style='text-align: center; margin-top: 5vh;'>⚖️ GPAdv</h1>", unsafe_allow_html=True)
     st.markdown("<h4 style='text-align: center; color: gray;'>Sistema Corporativo de Gestão Jurídica</h4>", unsafe_allow_html=True)
     
     col1, col2, col3 = st.columns([1, 1, 1])
     with col2:
         with st.container(border=True):
-            tab1, tab2 = st.tabs(["🔐 Entrar", "📝 Cadastre-se"])
+            tab1, tab2, tab3 = st.tabs(["🔐 Entrar", "📝 Cadastre-se", "🔑 Esqueci a Senha"])
             
             with tab1:
                 auth_email = st.text_input("E-mail corporativo", key="log_email")
@@ -395,6 +399,17 @@ if not st.session_state['authenticated']:
                             signup(new_email, new_senha)
                     else:
                         st.warning("Preencha um e-mail válido e uma senha com no mínimo 6 caracteres.")
+                        
+            with tab3:
+                st.markdown("Insira seu e-mail para receber um link de redefinição de senha.")
+                rec_email = st.text_input("E-mail corporativo", key="rec_email")
+                
+                if st.button("Enviar E-mail de Recuperação", use_container_width=True):
+                    if rec_email:
+                        with st.spinner("Solicitando link seguro..."):
+                            reset_password(rec_email)
+                    else:
+                        st.warning("Por favor, insira o seu e-mail de acesso.")
 else:
     # TELA DO SISTEMA AUTENTICADO
     
@@ -543,23 +558,40 @@ else:
 
     # ---------------- TAB 2: CONFIGURAÇÕES PESSOAIS ----------------
     with tab_config:
-        st.subheader("⚙️ Configurações de Integração (IMAP)")
-        st.write("Estas credenciais são exclusivas para o seu usuário e serão salvas de forma segura no banco de dados, permitindo que o sistema leia sua caixa de entrada para localizar publicações.")
+        col_conf1, col_conf2 = st.columns(2)
         
-        with st.container(border=True):
-            email_imap = st.text_input("Seu E-mail Profissional (Ex: seuemail@gmail.com)")
-            pwd_imap = st.text_input("Senha de Aplicativo (App Password)", type="password")
-            
-            if st.button("Salvar Minhas Configurações", type="primary"):
-                if email_imap and pwd_imap:
-                    supabase.table("configuracoes").upsert({
-                        "usuario_email": st.session_state['user_email'],
-                        "imap_email": email_imap,
-                        "imap_pwd": pwd_imap
-                    }).execute()
-                    st.success("Configurações IMAP vinculadas ao seu perfil com sucesso!")
-                else:
-                    st.warning("Preencha o e-mail e a senha para salvar.")
+        with col_conf1:
+            st.subheader("⚙️ Integração de E-mail (IMAP)")
+            st.write("Estas credenciais são exclusivas para o seu usuário e serão salvas de forma segura no banco de dados.")
+            with st.container(border=True):
+                email_imap = st.text_input("Seu E-mail Profissional (Ex: seuemail@gmail.com)")
+                pwd_imap = st.text_input("Senha de Aplicativo (App Password)", type="password")
+                
+                if st.button("Salvar Minhas Configurações", type="primary"):
+                    if email_imap and pwd_imap:
+                        supabase.table("configuracoes").upsert({
+                            "usuario_email": st.session_state['user_email'],
+                            "imap_email": email_imap,
+                            "imap_pwd": pwd_imap
+                        }).execute()
+                        st.success("Configurações IMAP vinculadas ao seu perfil com sucesso!")
+                    else:
+                        st.warning("Preencha o e-mail e a senha para salvar.")
+
+        with col_conf2:
+            st.subheader("🔑 Alterar Minha Senha")
+            st.write("Caso você tenha usado a recuperação por link mágico ou deseje trocar sua credencial de acesso atual.")
+            with st.container(border=True):
+                nova_senha_update = st.text_input("Nova Senha de Acesso", type="password", key="new_pwd_update")
+                if st.button("Atualizar Senha", type="primary", use_container_width=True):
+                    if len(nova_senha_update) >= 6:
+                        try:
+                            supabase.auth.update_user({"password": nova_senha_update})
+                            st.success("Senha atualizada no banco de dados com sucesso!")
+                        except Exception as e:
+                            st.error(f"Erro ao atualizar senha: {e}")
+                    else:
+                        st.warning("A senha deve ter no mínimo 6 caracteres.")
 
     # ---------------- TAB 3: INTELIGÊNCIA DE PDF ----------------
     with tab_ia:
