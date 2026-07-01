@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# GPAdv_Web.py  —  "Meu Controle Jurídico" (Web / Supabase Enterprise)
+# GPAdv_Web.py  —  "Meu Controle Jurídico" (Web / Supabase)
 # ------------------------------------------------------------------------------------
 
 import os
@@ -33,28 +33,15 @@ st.set_page_config(
 # ---------------- Inicialização do Supabase ----------------
 @st.cache_resource
 def init_connection() -> Client:
-    try:
-        url = st.secrets["SUPABASE_URL"]
-        key = st.secrets["SUPABASE_KEY"]
-        return create_client(url, key)
-    except KeyError:
-        st.error("⚠️ Chaves principais do Supabase não encontradas nos Secrets.")
-        st.stop()
-
-@st.cache_resource
-def init_admin_connection() -> Client:
-    try:
-        url = st.secrets["SUPABASE_URL"]
-        service_key = st.secrets["SUPABASE_SERVICE_ROLE_KEY"]
-        return create_client(url, service_key)
-    except KeyError:
-        return None
+    # Substitua pelas suas chaves reais do projeto no Brasil
+    url = "https://cepzkxjdvtidonybkcte.supabase.co"
+    key = "sb_publishable_287QhMSn5JrlsI8-0ut7uA_cfo-3MUe"
+    return create_client(url, key)
 
 supabase = init_connection()
-admin_supabase = init_admin_connection()
 
 # ---------------- Config & Paths Locais (E-mail/Cripto) ----------------
-APP_VERSION = "27.0 (Enterprise + Admin)"
+APP_VERSION = "28.0 (Self-Service Auth)"
 INSTALL_DIR = Path("C:/GerenciadorProcessos")
 DATA_DIR = INSTALL_DIR / "data"
 
@@ -132,6 +119,17 @@ def login(email_input, password_input):
             st.rerun()
     except Exception as e:
         st.error(f"Falha na autenticação: Verifique suas credenciais. (Erro: {e})")
+
+def signup(email_input, password_input):
+    try:
+        # A senha deve ter pelo menos 6 caracteres por padrão no Supabase
+        response = supabase.auth.sign_up({
+            "email": email_input,
+            "password": password_input
+        })
+        st.success("🎉 Cadastro realizado com sucesso! Você já pode ir na aba 'Entrar' e acessar o sistema.")
+    except Exception as e:
+        st.error(f"Falha ao realizar cadastro. (Erro: {e})")
 
 def logout():
     try:
@@ -282,23 +280,37 @@ def generate_piece(proc_num):
 # ==============================================================================
 
 if not st.session_state['authenticated']:
-    # TELA DE LOGIN
-    st.markdown("<h1 style='text-align: center; margin-top: 10vh;'>⚖️ GPAdv</h1>", unsafe_allow_html=True)
+    # TELA DE LOGIN / CADASTRO
+    st.markdown("<h1 style='text-align: center; margin-top: 5vh;'>⚖️ GPAdv</h1>", unsafe_allow_html=True)
     st.markdown("<h4 style='text-align: center; color: gray;'>Sistema Corporativo de Gestão Jurídica</h4>", unsafe_allow_html=True)
     
     col1, col2, col3 = st.columns([1, 1, 1])
     with col2:
         with st.container(border=True):
-            st.subheader("Acesso ao Sistema")
-            auth_email = st.text_input("E-mail corporativo")
-            auth_senha = st.text_input("Senha", type="password")
+            tab1, tab2 = st.tabs(["🔐 Entrar", "📝 Cadastre-se"])
             
-            if st.button("Entrar", type="primary", use_container_width=True):
-                if auth_email and auth_senha:
-                    with st.spinner("Autenticando..."):
-                        login(auth_email, auth_senha)
-                else:
-                    st.warning("Preencha todos os campos.")
+            with tab1:
+                auth_email = st.text_input("E-mail corporativo", key="log_email")
+                auth_senha = st.text_input("Senha", type="password", key="log_pwd")
+                
+                if st.button("Acessar", type="primary", use_container_width=True):
+                    if auth_email and auth_senha:
+                        with st.spinner("Autenticando..."):
+                            login(auth_email, auth_senha)
+                    else:
+                        st.warning("Preencha todos os campos para entrar.")
+                        
+            with tab2:
+                st.markdown("Crie sua conta para acessar a plataforma.")
+                new_email = st.text_input("Novo e-mail", key="reg_email")
+                new_senha = st.text_input("Crie uma senha (mínimo 6 caracteres)", type="password", key="reg_pwd")
+                
+                if st.button("Criar Conta", use_container_width=True):
+                    if new_email and len(new_senha) >= 6:
+                        with st.spinner("Registrando..."):
+                            signup(new_email, new_senha)
+                    else:
+                        st.warning("Preencha um e-mail válido e uma senha com no mínimo 6 caracteres.")
 else:
     # TELA DO SISTEMA AUTENTICADO
     
@@ -307,37 +319,6 @@ else:
         st.markdown(f"👤 **Usuário:** {st.session_state['user_email']}")
         if st.button("Sair do Sistema", use_container_width=True):
             logout()
-            
-        # ---------------------------------------------------------
-        # ÁREA DO ADMINISTRADOR
-        # ---------------------------------------------------------
-        EMAIL_ADMINISTRADOR = "brunothiagosilva@gmail.com" 
-        
-        if st.session_state['user_email'] == EMAIL_ADMINISTRADOR:
-            st.divider()
-            st.markdown("### 👑 Área do Administrador")
-            with st.expander("Cadastrar Novo Usuário", expanded=False):
-                with st.form("new_user_form", clear_on_submit=True):
-                    novo_email = st.text_input("E-mail do novo usuário")
-                    nova_senha = st.text_input("Senha inicial", type="password")
-                    btn_criar_user = st.form_submit_button("Criar Conta", use_container_width=True)
-                    
-                    if btn_criar_user:
-                        if len(nova_senha) < 6:
-                            st.error("A senha deve ter no mínimo 6 caracteres.")
-                        elif not admin_supabase:
-                            st.error("Chave de Admin (Service Role Key) não configurada nos secrets.")
-                        else:
-                            try:
-                                admin_supabase.auth.admin.create_user({
-                                    "email": novo_email,
-                                    "password": nova_senha,
-                                    "email_confirm": True
-                                })
-                                st.success(f"Usuário {novo_email} criado com sucesso!")
-                            except Exception as e:
-                                st.error(f"Erro ao criar usuário: {e}")
-        # ---------------------------------------------------------
             
         st.divider()
         st.header("Ações Operacionais")
