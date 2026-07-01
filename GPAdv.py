@@ -46,7 +46,7 @@ def init_connection() -> Client:
 supabase = init_connection()
 
 # ---------------- Config & Paths Locais (E-mail/Cripto) ----------------
-APP_VERSION = "32.0 (Enterprise Auth, AI & OTP Recovery)"
+APP_VERSION = "32.1 (Enterprise Auth, AI & OTP Recovery Debug)"
 INSTALL_DIR = Path("C:/GerenciadorProcessos")
 DATA_DIR = INSTALL_DIR / "data"
 
@@ -408,7 +408,8 @@ if not st.session_state['authenticated']:
                                 st.session_state['recovery_email'] = rec_email 
                                 st.success("E-mail enviado! Verifique o código numérico na sua caixa de entrada (ou spam).")
                             except Exception as e:
-                                st.error(f"Erro ao solicitar recuperação.")
+                                # AQUI ESTÁ A CORREÇÃO CRÍTICA PARA MOSTRAR O ERRO REAL:
+                                st.error(f"Erro detalhado do Supabase: {e}")
                     else:
                         st.warning("Por favor, insira o seu e-mail de acesso.")
                 
