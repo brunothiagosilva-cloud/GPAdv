@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# GPAdv_Web.py  —  "Meu Controle Jurídico" (Web / Streamlit)
+# GPAdv_Web.py  —  "Meu Controle Jurídico" (Web / Supabase)
 # ------------------------------------------------------------------------------------
 
 import os
@@ -8,11 +8,11 @@ import re
 import imaplib
 import email
 import datetime
-import sqlite3
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+from supabase import create_client, Client
 from cryptography.fernet import Fernet
 
 # --- Dependências Opcionais ---
@@ -23,71 +23,37 @@ except ImportError:
 
 # ---------------- Configurações da Página ----------------
 st.set_page_config(
-    page_title="Meu Controle Jurídico",
+    page_title="GPAdv - Meu Controle Jurídico",
     page_icon="⚖️",
     layout="wide"
 )
 
-# ---------------- Config & Paths ----------------
-APP_VERSION = "24.0 (Web)"
+# ---------------- Inicialização do Supabase ----------------
+@st.cache_resource
+def init_connection() -> Client:
+    try:
+        url = st.secrets["SUPABASE_URL"]
+        key = st.secrets["SUPABASE_KEY"]
+        return create_client(url, key)
+    except KeyError:
+        st.error("⚠️ Chaves do Supabase não encontradas. Configure o arquivo .streamlit/secrets.toml")
+        st.stop()
+
+supabase = init_connection()
+
+# ---------------- Config & Paths Locais (E-mail/Cripto) ----------------
+APP_VERSION = "25.0 (Cloud)"
 INSTALL_DIR = Path("C:/GerenciadorProcessos")
 DATA_DIR = INSTALL_DIR / "data"
 
 for p in (INSTALL_DIR, DATA_DIR):
     p.mkdir(parents=True, exist_ok=True)
 
-DB_PATH = DATA_DIR / "processos.db"
 CONFIG_PATH = INSTALL_DIR / "config.json"
 KEY_PATH = INSTALL_DIR / "secret.key"
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 
-# ---------------- Banco de Dados (SQLite) ----------------
-def init_db():
-    with sqlite3.connect(DB_PATH) as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS processos (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                numero TEXT,
-                tribunal TEXT,
-                parte TEXT,
-                situacao TEXT,
-                prazo TEXT,
-                observacoes TEXT,
-                marcado TEXT,
-                cor_card TEXT,
-                notif_data TEXT
-            )
-        """)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS historico_pecas (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                numero_processo TEXT,
-                data_hora TEXT,
-                descricao TEXT,
-                arquivo TEXT
-            )
-        """)
-        conn.commit()
-
-def execute_db_query(query, params=()):
-    try:
-        with sqlite3.connect(DB_PATH) as conn:
-            cursor = conn.cursor()
-            cursor.execute(query, params)
-            conn.commit()
-    except Exception as e:
-        st.error(f"Erro no banco de dados: {e}")
-
-def load_data():
-    with sqlite3.connect(DB_PATH) as conn:
-        df = pd.read_sql_query("SELECT * FROM processos", conn)
-    return df
-
-init_db()
-
-# ---------------- Config & Cripto ----------------
 DEFAULT_CONFIG = {
     "email": {
         "imap_host": "imap.gmail.com",
@@ -134,12 +100,24 @@ def load_config():
 
 CONFIG = load_config()
 
-# ---------------- Lógica de Negócios ----------------
+# ---------------- Funções de Banco de Dados (Supabase) ----------------
+def load_data():
+    try:
+        response = supabase.table("processos").select("*").order("id", desc=True).execute()
+        if response.data:
+            return pd.DataFrame(response.data)
+        else:
+            # Retorna DataFrame vazio com as colunas corretas se não houver dados
+            return pd.DataFrame(columns=["id", "numero", "tribunal", "parte", "situacao", "prazo", "observacoes", "marcado", "cor_card", "notif_data"])
+    except Exception as e:
+        st.error(f"Erro ao carregar dados: {e}")
+        return pd.DataFrame()
 
+# ---------------- Lógica de Negócios ----------------
 def read_publications_from_email():
     cfg = CONFIG.get("email", {})
     if not cfg.get("username") or not cfg.get("password_enc"):
-        st.warning("Configure as credenciais de e-mail no arquivo config.json.")
+        st.warning("Configure as credenciais de e-mail no arquivo config.json (C:/GerenciadorProcessos).")
         return
 
     try:
@@ -167,7 +145,11 @@ def read_publications_from_email():
         if matched:
             now_str = datetime.datetime.now().strftime("%Y-%m-%d")
             for proc_num in matched:
-                execute_db_query("UPDATE processos SET marcado = '📩', notif_data = ? WHERE numero = ?", (now_str, proc_num))
+                # Atualiza no Supabase
+                supabase.table("processos").update(
+                    {"marcado": "📩", "notif_data": now_str}
+                ).eq("numero", proc_num).execute()
+                
             st.success(f"{len(matched)} publicações encontradas e marcadas!")
         else:
             st.info("Nenhum número de processo encontrado nos e-mails não lidos.")
@@ -189,8 +171,13 @@ def generate_piece(proc_num):
         texto = resp['choices'][0]['message']['content']
         
         now = datetime.datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-        execute_db_query("INSERT INTO historico_pecas (numero_processo, data_hora, descricao) VALUES (?, ?, ?)", 
-                         (proc_num, now, "Petição Gerada via AI"))
+        
+        # Insere histórico no Supabase
+        supabase.table("historico_pecas").insert({
+            "numero_processo": proc_num, 
+            "data_hora": now, 
+            "descricao": "Petição Gerada via AI"
+        }).execute()
                          
         st.success(f"Peça gerada para {proc_num} com sucesso!")
         with st.expander("Ver Peça Gerada", expanded=True):
@@ -200,8 +187,7 @@ def generate_piece(proc_num):
         st.error(f"Erro na OpenAI: {e}")
 
 # ---------------- Interface Streamlit ----------------
-
-st.title(f"⚖️ Meu Controle Jurídico v{APP_VERSION}")
+st.title(f"⚖️ GPAdv - Meu Controle Jurídico v{APP_VERSION}")
 
 # Layout principal: Sidebar e Conteúdo
 with st.sidebar:
@@ -212,12 +198,22 @@ with st.sidebar:
         new_numero = st.text_input("Número do Processo")
         new_parte = st.text_input("Nome da Parte")
         submitted = st.form_submit_button("Salvar")
+        
         if submitted and new_numero:
-            execute_db_query(
-                "INSERT INTO processos (numero, tribunal, parte, situacao, prazo, observacoes, marcado, cor_card, notif_data) VALUES (?, 'TJ-SP', ?, 'Em Andamento', '', '', '', '', '')",
-                (new_numero, new_parte)
-            )
-            st.success("Adicionado!")
+            # Insere novo processo no Supabase
+            supabase.table("processos").insert({
+                "numero": new_numero, 
+                "tribunal": "TJ-SP", 
+                "parte": new_parte, 
+                "situacao": "Em Andamento", 
+                "prazo": "", 
+                "observacoes": "", 
+                "marcado": "", 
+                "cor_card": "", 
+                "notif_data": ""
+            }).execute()
+            
+            st.success("Adicionado com sucesso!")
             st.rerun()
 
     st.divider()
@@ -232,49 +228,57 @@ df = load_data()
 
 # Filtro de Busca
 busca = st.text_input("🔍 Pesquisar Processo:", "")
-if busca:
+if busca and not df.empty:
     df = df[df.apply(lambda row: row.astype(str).str.contains(busca, case=False).any(), axis=1)]
 
 st.write("### Grid de Processos")
-st.caption("Edite diretamente na tabela abaixo. Para excluir, selecione a linha na lateral esquerda e aperte a lixeira no cabeçalho.")
+st.caption("Edite diretamente na tabela abaixo. Para excluir, selecione a linha na lateral esquerda e aperte a lixeira (canto superior da tabela).")
 
-# O st.data_editor substitui perfeitamente o Treeview com edição inline
-edited_df = st.data_editor(
-    df,
-    use_container_width=True,
-    num_rows="dynamic",
-    hide_index=True,
-    column_config={
-        "id": None, # Esconde o ID interno
-        "cor_card": None,
-        "notif_data": None
-    },
-    key="process_editor"
-)
+if df.empty:
+    st.info("Nenhum processo encontrado. Adicione um novo processo pelo menu lateral.")
+else:
+    # Renderiza a tabela editável
+    edited_df = st.data_editor(
+        df,
+        use_container_width=True,
+        num_rows="dynamic",
+        hide_index=True,
+        column_config={
+            "id": None, # Esconde a coluna ID do banco
+            "cor_card": None,
+            "notif_data": None
+        },
+        key="process_editor"
+    )
 
-# Sincronização automática das edições do data_editor com o SQLite
-if st.session_state.get("process_editor"):
-    changes = st.session_state["process_editor"]
-    needs_rerun = False
-    
-    # 1. Processar Edições Inline
-    if changes.get("edited_rows"):
-        for row_idx, col_changes in changes["edited_rows"].items():
-            proc_id = df.iloc[row_idx]["id"]
-            for col_name, new_val in col_changes.items():
-                query = f"UPDATE processos SET {col_name} = ? WHERE id = ?"
-                execute_db_query(query, (new_val, int(proc_id)))
-        needs_rerun = True
+    # Captura as edições e atualiza o Supabase
+    if st.session_state.get("process_editor"):
+        changes = st.session_state["process_editor"]
+        needs_rerun = False
         
-    # 2. Processar Deleções
-    if changes.get("deleted_rows"):
-        for row_idx in changes["deleted_rows"]:
-            proc_id = df.iloc[row_idx]["id"]
-            execute_db_query("DELETE FROM processos WHERE id = ?", (int(proc_id),))
-        needs_rerun = True
+        # 1. Processar Edições Inline (Updates)
+        if changes.get("edited_rows"):
+            for row_idx, col_changes in changes["edited_rows"].items():
+                proc_id = df.iloc[row_idx]["id"]
+                
+                # Atualiza os campos modificados no Supabase
+                supabase.table("processos").update(col_changes).eq("id", proc_id).execute()
+                
+            needs_rerun = True
+            
+        # 2. Processar Deleções (Deletes)
+        if changes.get("deleted_rows"):
+            for row_idx in changes["deleted_rows"]:
+                proc_id = df.iloc[row_idx]["id"]
+                
+                # Deleta o registro no Supabase
+                supabase.table("processos").delete().eq("id", proc_id).execute()
+                
+            needs_rerun = True
 
-    if needs_rerun:
-        st.rerun()
+        if needs_rerun:
+            st.success("Alterações salvas na nuvem!")
+            st.rerun()
 
 # Seção de Geração de Peças
 st.divider()
