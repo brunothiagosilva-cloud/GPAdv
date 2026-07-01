@@ -38,13 +38,23 @@ def init_connection() -> Client:
         key = st.secrets["SUPABASE_KEY"]
         return create_client(url, key)
     except KeyError:
-        st.error("⚠️ Chaves do Supabase não encontradas. Verifique o arquivo .streamlit/secrets.toml ou os Secrets do Streamlit Cloud.")
+        st.error("⚠️ Chaves principais do Supabase não encontradas nos Secrets.")
         st.stop()
 
+@st.cache_resource
+def init_admin_connection() -> Client:
+    try:
+        url = st.secrets["SUPABASE_URL"]
+        service_key = st.secrets["SUPABASE_SERVICE_ROLE_KEY"]
+        return create_client(url, service_key)
+    except KeyError:
+        return None
+
 supabase = init_connection()
+admin_supabase = init_admin_connection()
 
 # ---------------- Config & Paths Locais (E-mail/Cripto) ----------------
-APP_VERSION = "26.0 (Enterprise Cloud)"
+APP_VERSION = "27.0 (Enterprise + Admin)"
 INSTALL_DIR = Path("C:/GerenciadorProcessos")
 DATA_DIR = INSTALL_DIR / "data"
 
@@ -146,14 +156,12 @@ def load_data():
 
 # ---------------- Funções de Importação e Exportação (Excel) ----------------
 def export_to_excel(df: pd.DataFrame) -> bytes:
-    """Gera um arquivo Excel em memória a partir do DataFrame."""
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         df.to_excel(writer, index=False, sheet_name='Processos_GPAdv')
         workbook = writer.book
         worksheet = writer.sheets['Processos_GPAdv']
         
-        # Formatação básica de colunas
         header_format = workbook.add_format({'bold': True, 'bg_color': '#D7E4BC', 'border': 1})
         for col_num, value in enumerate(df.columns.values):
             worksheet.write(0, col_num, value, header_format)
@@ -162,22 +170,18 @@ def export_to_excel(df: pd.DataFrame) -> bytes:
     return output.getvalue()
 
 def import_from_excel(uploaded_file):
-    """Lê um arquivo Excel e insere os registros no Supabase."""
     try:
         df_import = pd.read_excel(uploaded_file, engine='openpyxl')
         
-        # Validação básica de colunas esperadas
         colunas_esperadas = ["numero", "tribunal", "parte", "situacao", "prazo"]
         for col in colunas_esperadas:
             if col not in df_import.columns:
                 st.error(f"A coluna '{col}' está ausente na planilha. O formato está incorreto.")
                 return False
                 
-        # Preparar dados para inserção (remove NaNs que quebram o JSON do Supabase)
         df_import = df_import.fillna("")
         registros = df_import.to_dict(orient="records")
         
-        # Filtra apenas as colunas que pertencem ao banco de dados para evitar erro de schema
         registros_limpos = []
         for reg in registros:
             registros_limpos.append({
@@ -192,7 +196,6 @@ def import_from_excel(uploaded_file):
                 "notif_data": str(reg.get("notif_data", ""))
             })
             
-        # Inserção em lote (Batch Insert)
         if registros_limpos:
             supabase.table("processos").insert(registros_limpos).execute()
             return True
@@ -305,10 +308,40 @@ else:
         if st.button("Sair do Sistema", use_container_width=True):
             logout()
             
+        # ---------------------------------------------------------
+        # ÁREA DO ADMINISTRADOR
+        # ---------------------------------------------------------
+        EMAIL_ADMINISTRADOR = "brunothiagosilva@gmail.com" 
+        
+        if st.session_state['user_email'] == EMAIL_ADMINISTRADOR:
+            st.divider()
+            st.markdown("### 👑 Área do Administrador")
+            with st.expander("Cadastrar Novo Usuário", expanded=False):
+                with st.form("new_user_form", clear_on_submit=True):
+                    novo_email = st.text_input("E-mail do novo usuário")
+                    nova_senha = st.text_input("Senha inicial", type="password")
+                    btn_criar_user = st.form_submit_button("Criar Conta", use_container_width=True)
+                    
+                    if btn_criar_user:
+                        if len(nova_senha) < 6:
+                            st.error("A senha deve ter no mínimo 6 caracteres.")
+                        elif not admin_supabase:
+                            st.error("Chave de Admin (Service Role Key) não configurada nos secrets.")
+                        else:
+                            try:
+                                admin_supabase.auth.admin.create_user({
+                                    "email": novo_email,
+                                    "password": nova_senha,
+                                    "email_confirm": True
+                                })
+                                st.success(f"Usuário {novo_email} criado com sucesso!")
+                            except Exception as e:
+                                st.error(f"Erro ao criar usuário: {e}")
+        # ---------------------------------------------------------
+            
         st.divider()
         st.header("Ações Operacionais")
         
-        # Adicionar Registro Manual
         with st.form("add_process_form", clear_on_submit=True):
             st.subheader("➕ Novo Processo")
             new_numero = st.text_input("Número do Processo")
@@ -332,7 +365,6 @@ else:
 
         st.divider()
         
-        # Leitor de Publicações
         if st.button("📧 Sincronizar Publicações (IMAP)", use_container_width=True):
             with st.spinner("Varrendo caixa de entrada..."):
                 read_publications_from_email()
@@ -342,17 +374,14 @@ else:
     st.title(f"⚖️ Dashboard de Processos")
     st.caption(f"Versão Corporativa {APP_VERSION}")
 
-    # Carrega dados do Banco
     df = load_data()
 
-    # Filtros e Métricas
     if not df.empty:
         met1, met2, met3 = st.columns(3)
         met1.metric("Total de Processos", len(df))
         met2.metric("Com Publicação Recente", len(df[df['marcado'] == '📩']))
         met3.metric("Em Andamento", len(df[df['situacao'].str.contains('Andamento', case=False, na=False)]))
 
-    # --- Container de Ferramentas de Tabela ---
     with st.container(border=True):
         col_search, col_export, col_import = st.columns([2, 1, 1])
         
@@ -362,7 +391,7 @@ else:
                 df = df[df.apply(lambda row: row.astype(str).str.contains(busca, case=False).any(), axis=1)]
                 
         with col_export:
-            st.write("<br>", unsafe_allow_html=True) # Espaçador
+            st.write("<br>", unsafe_allow_html=True)
             if not df.empty:
                 excel_bytes = export_to_excel(df)
                 st.download_button(
@@ -385,7 +414,6 @@ else:
                                 st.success("Importação concluída!")
                                 st.rerun()
 
-    # --- Tabela Editável ---
     st.write("### Base de Dados")
     st.caption("Edição Inline: Dê um duplo clique em qualquer célula para editar e pressione Enter. As alterações são sincronizadas em tempo real com a nuvem.")
 
@@ -398,7 +426,7 @@ else:
             num_rows="dynamic",
             hide_index=True,
             column_config={
-                "id": None, # Proteção do ID
+                "id": None,
                 "cor_card": None,
                 "notif_data": None,
                 "numero": st.column_config.TextColumn("Número (CNJ)", required=True),
@@ -407,7 +435,6 @@ else:
             key="process_editor"
         )
 
-        # Captura de alterações (Commit no DB)
         if st.session_state.get("process_editor"):
             changes = st.session_state["process_editor"]
             needs_rerun = False
@@ -428,7 +455,6 @@ else:
                 st.toast("✅ Banco de dados atualizado com sucesso!")
                 st.rerun()
 
-    # --- Módulo de Inteligência Artificial ---
     st.divider()
     st.write("### 🧠 Módulo de Engenharia Jurídica (IA)")
     col_ai1, col_ai2 = st.columns([1, 2])
