@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# GPAdv_Web.py  —  "Meu Controle Jurídico" (Web / Supabase)
+# GPAdv_Web.py  —  "Meu Controle Jurídico" (Web / Supabase Enterprise)
 # ------------------------------------------------------------------------------------
 
 import os
@@ -22,6 +22,11 @@ try:
 except ImportError:
     openai = None
 
+try:
+    from pypdf import PdfReader
+except ImportError:
+    PdfReader = None
+
 # ---------------- Configurações da Página ----------------
 st.set_page_config(
     page_title="GPAdv - Sistema de Gestão Jurídica",
@@ -41,7 +46,7 @@ def init_connection() -> Client:
 supabase = init_connection()
 
 # ---------------- Config & Paths Locais (E-mail/Cripto) ----------------
-APP_VERSION = "28.0 (Self-Service Auth)"
+APP_VERSION = "30.0 (Enterprise Auth & AI)"
 INSTALL_DIR = Path("C:/GerenciadorProcessos")
 DATA_DIR = INSTALL_DIR / "data"
 
@@ -100,11 +105,70 @@ def load_config():
 
 CONFIG = load_config()
 
+# ---------------- Lógica de Negócios (CNJ, Permissões, PDF) ----------------
+def formatar_cnj(numero):
+    n = re.sub(r'\D', '', numero)
+    if len(n) == 20:
+        return f"{n[0:7]}-{n[7:9]}.{n[9:13]}.{n[13]}.{n[14:16]}.{n[16:20]}"
+    return numero
+
+def verificar_acesso(email_usuario):
+    try:
+        res = supabase.table("permissoes").select("perfil").eq("email", email_usuario).execute()
+        if res.data:
+            return res.data[0]
+        return None
+    except Exception:
+        return None
+
+def processar_pdf_movimentacao(uploaded_file):
+    if not openai or not CONFIG.get("openai", {}).get("enabled"):
+        st.warning("Módulo OpenAI não está habilitado ou configurado.")
+        return None
+        
+    try:
+        reader = PdfReader(uploaded_file)
+        texto_pdf = "\n".join([page.extract_text() for page in reader.pages if page.extract_text()])
+        
+        openai.api_key = CONFIG["openai"]["api_key"] or OPENAI_API_KEY
+        prompt = f"""
+        Extraia as seguintes informações deste texto de movimentação processual em formato JSON:
+        - numero_processo (formato CNJ)
+        - data_movimentacao (DD/MM/AAAA)
+        - resumo_movimentacao (texto resumido do evento)
+        - possui_prazo (true ou false)
+        - prazo_final (data se houver, ou texto vazio)
+        
+        Texto: {texto_pdf[:4000]}
+        """
+        
+        resp = openai.ChatCompletion.create(
+            model=CONFIG["openai"]["model"],
+            messages=[{"role": "user", "content": prompt}]
+        )
+        
+        texto_resp = resp['choices'][0]['message']['content']
+        texto_resp = texto_resp.replace('```json', '').replace('```', '').strip()
+        dados_json = json.loads(texto_resp)
+        
+        supabase.table("historico_pecas").insert({
+            "numero_processo": dados_json.get('numero_processo', ''),
+            "data_hora": dados_json.get('data_movimentacao', ''),
+            "descricao": f"Movimentação Extraída (PDF): {dados_json.get('resumo_movimentacao', '')}"
+        }).execute()
+        
+        return dados_json
+    except Exception as e:
+        st.error(f"Erro ao processar PDF via IA: {e}")
+        return None
+
 # ---------------- Gestão de Estado da Sessão (Autenticação) ----------------
 if 'authenticated' not in st.session_state:
     st.session_state['authenticated'] = False
 if 'user_email' not in st.session_state:
     st.session_state['user_email'] = ""
+if 'perfil' not in st.session_state:
+    st.session_state['perfil'] = ""
 
 def login(email_input, password_input):
     try:
@@ -113,21 +177,26 @@ def login(email_input, password_input):
             "password": password_input
         })
         if response.user:
-            st.session_state['authenticated'] = True
-            st.session_state['user_email'] = response.user.email
-            st.success("Login realizado com sucesso!")
-            st.rerun()
+            acesso = verificar_acesso(response.user.email)
+            if acesso:
+                st.session_state['authenticated'] = True
+                st.session_state['user_email'] = response.user.email
+                st.session_state['perfil'] = acesso.get('perfil', 'usuario')
+                st.success("Login realizado com sucesso!")
+                st.rerun()
+            else:
+                st.error("Acesso não autorizado para este e-mail. Solicite liberação ao administrador.")
+                supabase.auth.sign_out()
     except Exception as e:
         st.error(f"Falha na autenticação: Verifique suas credenciais. (Erro: {e})")
 
 def signup(email_input, password_input):
     try:
-        # A senha deve ter pelo menos 6 caracteres por padrão no Supabase
         response = supabase.auth.sign_up({
             "email": email_input,
             "password": password_input
         })
-        st.success("🎉 Cadastro realizado com sucesso! Você já pode ir na aba 'Entrar' e acessar o sistema.")
+        st.success("🎉 Cadastro realizado com sucesso! Aguarde a liberação do seu e-mail no banco de dados para entrar.")
     except Exception as e:
         st.error(f"Falha ao realizar cadastro. (Erro: {e})")
 
@@ -138,6 +207,7 @@ def logout():
         pass
     st.session_state['authenticated'] = False
     st.session_state['user_email'] = ""
+    st.session_state['perfil'] = ""
     st.rerun()
 
 # ---------------- Funções de Banco de Dados (Supabase) ----------------
@@ -182,8 +252,10 @@ def import_from_excel(uploaded_file):
         
         registros_limpos = []
         for reg in registros:
+            # Formata automaticamente os CNJs vindos do Excel
+            num_formatado = formatar_cnj(str(reg.get("numero", "")))
             registros_limpos.append({
-                "numero": str(reg.get("numero", "")),
+                "numero": num_formatado,
                 "tribunal": str(reg.get("tribunal", "TJ-SP")),
                 "parte": str(reg.get("parte", "")),
                 "situacao": str(reg.get("situacao", "Em Andamento")),
@@ -204,15 +276,27 @@ def import_from_excel(uploaded_file):
 
 # ---------------- Lógica de Negócios (Email & IA) ----------------
 def read_publications_from_email():
-    cfg = CONFIG.get("email", {})
-    if not cfg.get("username") or not cfg.get("password_enc"):
-        st.warning("Configure as credenciais de e-mail localmente antes de usar este recurso.")
+    # Busca credenciais específicas do usuário logado no banco de dados
+    try:
+        res = supabase.table("configuracoes").select("*").eq("usuario_email", st.session_state['user_email']).execute()
+        if res.data and res.data[0].get("imap_email") and res.data[0].get("imap_pwd"):
+            imap_user = res.data[0]["imap_email"]
+            imap_pwd = res.data[0]["imap_pwd"]
+        else:
+            st.warning("Configure suas credenciais de e-mail na aba '⚙️ Configurações' antes de sincronizar publicações.")
+            return
+    except Exception as e:
+        st.error(f"Erro ao buscar configurações de e-mail: {e}")
         return
 
+    # Usando servidor IMAP padrão do Gmail
+    imap_host = "imap.gmail.com"
+    imap_port = 993
+
     try:
-        M = imaplib.IMAP4_SSL(cfg["imap_host"], cfg["imap_port"])
-        M.login(cfg["username"], decrypt_pw(cfg["password_enc"]))
-        M.select(f'"{cfg["folder"]}"')
+        M = imaplib.IMAP4_SSL(imap_host, imap_port)
+        M.login(imap_user, imap_pwd)
+        M.select('"INBOX"')
         
         typ, data = M.search(None, '(UNSEEN)')
         if typ != 'OK' or not data[0]:
@@ -295,7 +379,7 @@ if not st.session_state['authenticated']:
                 
                 if st.button("Acessar", type="primary", use_container_width=True):
                     if auth_email and auth_senha:
-                        with st.spinner("Autenticando..."):
+                        with st.spinner("Autenticando e verificando permissões..."):
                             login(auth_email, auth_senha)
                     else:
                         st.warning("Preencha todos os campos para entrar.")
@@ -317,6 +401,7 @@ else:
     # --- Sidebar ---
     with st.sidebar:
         st.markdown(f"👤 **Usuário:** {st.session_state['user_email']}")
+        st.markdown(f"🛡️ **Perfil:** {str(st.session_state.get('perfil', 'usuario')).capitalize()}")
         if st.button("Sair do Sistema", use_container_width=True):
             logout()
             
@@ -325,13 +410,14 @@ else:
         
         with st.form("add_process_form", clear_on_submit=True):
             st.subheader("➕ Novo Processo")
-            new_numero = st.text_input("Número do Processo")
+            new_numero = st.text_input("Número do Processo (Mascara CNJ Automática)")
             new_parte = st.text_input("Nome da Parte")
             submitted = st.form_submit_button("Salvar Registro", use_container_width=True)
             
             if submitted and new_numero:
+                num_formatado = formatar_cnj(new_numero)
                 supabase.table("processos").insert({
-                    "numero": new_numero, 
+                    "numero": num_formatado, 
                     "tribunal": "TJ-SP", 
                     "parte": new_parte, 
                     "situacao": "Em Andamento", 
@@ -341,7 +427,7 @@ else:
                     "cor_card": "", 
                     "notif_data": ""
                 }).execute()
-                st.success("Processo cadastrado!")
+                st.success(f"Processo {num_formatado} cadastrado!")
                 st.rerun()
 
         st.divider()
@@ -351,102 +437,141 @@ else:
                 read_publications_from_email()
                 st.rerun()
 
-    # --- Área Principal ---
-    st.title(f"⚖️ Dashboard de Processos")
+    # --- Área Principal (Tabs Superiores) ---
+    st.title(f"⚖️ GPAdv")
     st.caption(f"Versão Corporativa {APP_VERSION}")
 
-    df = load_data()
+    tab_dash, tab_config, tab_ia = st.tabs(["📊 Dashboard Central", "⚙️ Configurações Pessoais", "🤖 Inteligência de Documentos (PDF)"])
 
-    if not df.empty:
-        met1, met2, met3 = st.columns(3)
-        met1.metric("Total de Processos", len(df))
-        met2.metric("Com Publicação Recente", len(df[df['marcado'] == '📩']))
-        met3.metric("Em Andamento", len(df[df['situacao'].str.contains('Andamento', case=False, na=False)]))
+    # ---------------- TAB 1: DASHBOARD CENTRAL ----------------
+    with tab_dash:
+        df = load_data()
 
-    with st.container(border=True):
-        col_search, col_export, col_import = st.columns([2, 1, 1])
-        
-        with col_search:
-            busca = st.text_input("🔍 Buscar em qualquer campo:", placeholder="Digite número, parte, tribunal...")
-            if busca and not df.empty:
-                df = df[df.apply(lambda row: row.astype(str).str.contains(busca, case=False).any(), axis=1)]
-                
-        with col_export:
-            st.write("<br>", unsafe_allow_html=True)
-            if not df.empty:
-                excel_bytes = export_to_excel(df)
-                st.download_button(
-                    label="📥 Exportar Excel",
-                    data=excel_bytes,
-                    file_name=f"Relatorio_Processos_{datetime.datetime.now().strftime('%Y%m%d')}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True
-                )
-                
-        with col_import:
-            with st.popover("📤 Importar Excel", use_container_width=True):
-                st.write("Selecione um arquivo .xlsx contendo as colunas padrão.")
-                uploaded_file = st.file_uploader("", type=["xlsx"])
-                if uploaded_file is not None:
-                    if st.button("Confirmar Importação Lote", type="primary"):
-                        with st.spinner("Inserindo registros no banco de dados..."):
-                            sucesso = import_from_excel(uploaded_file)
-                            if sucesso:
-                                st.success("Importação concluída!")
-                                st.rerun()
-
-    st.write("### Base de Dados")
-    st.caption("Edição Inline: Dê um duplo clique em qualquer célula para editar e pressione Enter. As alterações são sincronizadas em tempo real com a nuvem.")
-
-    if df.empty:
-        st.info("O banco de dados está vazio. Utilize o formulário lateral para adicionar registros ou importe uma planilha Excel.")
-    else:
-        edited_df = st.data_editor(
-            df,
-            use_container_width=True,
-            num_rows="dynamic",
-            hide_index=True,
-            column_config={
-                "id": None,
-                "cor_card": None,
-                "notif_data": None,
-                "numero": st.column_config.TextColumn("Número (CNJ)", required=True),
-                "situacao": st.column_config.SelectboxColumn("Status", options=["Em Andamento", "Arquivado", "Suspenso", "Concluído"]),
-            },
-            key="process_editor"
-        )
-
-        if st.session_state.get("process_editor"):
-            changes = st.session_state["process_editor"]
-            needs_rerun = False
-            
-            if changes.get("edited_rows"):
-                for row_idx, col_changes in changes["edited_rows"].items():
-                    proc_id = df.iloc[row_idx]["id"]
-                    supabase.table("processos").update(col_changes).eq("id", int(proc_id)).execute()
-                needs_rerun = True
-                
-            if changes.get("deleted_rows"):
-                for row_idx in changes["deleted_rows"]:
-                    proc_id = df.iloc[row_idx]["id"]
-                    supabase.table("processos").delete().eq("id", int(proc_id)).execute()
-                needs_rerun = True
-
-            if needs_rerun:
-                st.toast("✅ Banco de dados atualizado com sucesso!")
-                st.rerun()
-
-    st.divider()
-    st.write("### 🧠 Módulo de Engenharia Jurídica (IA)")
-    col_ai1, col_ai2 = st.columns([1, 2])
-
-    with col_ai1:
         if not df.empty:
-            processos_lista = df["numero"].tolist()
-            processo_selecionado = st.selectbox("Selecione o processo alvo para redação:", processos_lista)
+            met1, met2, met3 = st.columns(3)
+            met1.metric("Total de Processos", len(df))
+            met2.metric("Com Publicação Recente", len(df[df['marcado'] == '📩']))
+            met3.metric("Em Andamento", len(df[df['situacao'].str.contains('Andamento', case=False, na=False)]))
+
+        with st.container(border=True):
+            col_search, col_export, col_import = st.columns([2, 1, 1])
             
-            if st.button("Gerar Petição Inicial Completa", type="primary", use_container_width=True):
-                with st.spinner("Processando lógica jurídica e redigindo documento..."):
-                    generate_piece(processo_selecionado)
+            with col_search:
+                busca = st.text_input("🔍 Buscar em qualquer campo:", placeholder="Digite número, parte, tribunal...")
+                if busca and not df.empty:
+                    df = df[df.apply(lambda row: row.astype(str).str.contains(busca, case=False).any(), axis=1)]
+                    
+            with col_export:
+                st.write("<br>", unsafe_allow_html=True)
+                if not df.empty:
+                    excel_bytes = export_to_excel(df)
+                    st.download_button(
+                        label="📥 Exportar Excel",
+                        data=excel_bytes,
+                        file_name=f"Relatorio_Processos_{datetime.datetime.now().strftime('%Y%m%d')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True
+                    )
+                    
+            with col_import:
+                with st.popover("📤 Importar Excel", use_container_width=True):
+                    st.write("Selecione um arquivo .xlsx contendo as colunas padrão.")
+                    uploaded_file = st.file_uploader("", type=["xlsx"])
+                    if uploaded_file is not None:
+                        if st.button("Confirmar Importação Lote", type="primary"):
+                            with st.spinner("Formatando CNJs e inserindo registros..."):
+                                sucesso = import_from_excel(uploaded_file)
+                                if sucesso:
+                                    st.success("Importação concluída!")
+                                    st.rerun()
+
+        st.write("### Base de Dados")
+        st.caption("Edição Inline: Dê um duplo clique em qualquer célula para editar e pressione Enter. As alterações são sincronizadas em tempo real com a nuvem.")
+
+        if df.empty:
+            st.info("O banco de dados está vazio. Utilize o formulário lateral para adicionar registros ou importe uma planilha Excel.")
         else:
-            st.warning("Necessário cadastrar processos para utilizar o módulo de IA.")
+            edited_df = st.data_editor(
+                df,
+                use_container_width=True,
+                num_rows="dynamic",
+                hide_index=True,
+                column_config={
+                    "id": None,
+                    "cor_card": None,
+                    "notif_data": None,
+                    "numero": st.column_config.TextColumn("Número (CNJ)", required=True),
+                    "situacao": st.column_config.SelectboxColumn("Status", options=["Em Andamento", "Arquivado", "Suspenso", "Concluído"]),
+                },
+                key="process_editor"
+            )
+
+            if st.session_state.get("process_editor"):
+                changes = st.session_state["process_editor"]
+                needs_rerun = False
+                
+                if changes.get("edited_rows"):
+                    for row_idx, col_changes in changes["edited_rows"].items():
+                        proc_id = df.iloc[row_idx]["id"]
+                        supabase.table("processos").update(col_changes).eq("id", int(proc_id)).execute()
+                    needs_rerun = True
+                    
+                if changes.get("deleted_rows"):
+                    for row_idx in changes["deleted_rows"]:
+                        proc_id = df.iloc[row_idx]["id"]
+                        supabase.table("processos").delete().eq("id", int(proc_id)).execute()
+                    needs_rerun = True
+
+                if needs_rerun:
+                    st.toast("✅ Banco de dados atualizado com sucesso!")
+                    st.rerun()
+
+        st.divider()
+        st.write("### 🧠 Módulo de Engenharia Jurídica (IA)")
+        col_ai1, col_ai2 = st.columns([1, 2])
+
+        with col_ai1:
+            if not df.empty:
+                processos_lista = df["numero"].tolist()
+                processo_selecionado = st.selectbox("Selecione o processo alvo para redação:", processos_lista)
+                
+                if st.button("Gerar Petição Inicial Completa", type="primary", use_container_width=True):
+                    with st.spinner("Processando lógica jurídica e redigindo documento..."):
+                        generate_piece(processo_selecionado)
+            else:
+                st.warning("Necessário cadastrar processos para utilizar o módulo de IA.")
+
+    # ---------------- TAB 2: CONFIGURAÇÕES PESSOAIS ----------------
+    with tab_config:
+        st.subheader("⚙️ Configurações de Integração (IMAP)")
+        st.write("Estas credenciais são exclusivas para o seu usuário e serão salvas de forma segura no banco de dados, permitindo que o sistema leia sua caixa de entrada para localizar publicações.")
+        
+        with st.container(border=True):
+            email_imap = st.text_input("Seu E-mail Profissional (Ex: seuemail@gmail.com)")
+            pwd_imap = st.text_input("Senha de Aplicativo (App Password)", type="password")
+            
+            if st.button("Salvar Minhas Configurações", type="primary"):
+                if email_imap and pwd_imap:
+                    supabase.table("configuracoes").upsert({
+                        "usuario_email": st.session_state['user_email'],
+                        "imap_email": email_imap,
+                        "imap_pwd": pwd_imap
+                    }).execute()
+                    st.success("Configurações IMAP vinculadas ao seu perfil com sucesso!")
+                else:
+                    st.warning("Preencha o e-mail e a senha para salvar.")
+
+    # ---------------- TAB 3: INTELIGÊNCIA DE PDF ----------------
+    with tab_ia:
+        st.subheader("🤖 Extrator de Movimentações (PDF)")
+        st.write("Faça o upload do documento de movimentação do tribunal. A inteligência artificial lerá o PDF, identificará o número do processo, prazos e registrará o histórico automaticamente no seu banco de dados.")
+        
+        uploaded_pdf = st.file_uploader("Selecione o arquivo PDF", type=["pdf"])
+        
+        if uploaded_pdf is not None:
+            if st.button("Processar Movimentação via IA", type="primary", use_container_width=True):
+                with st.spinner("Lendo documento e extraindo dados críticos..."):
+                    resultado = processar_pdf_movimentacao(uploaded_pdf)
+                    if resultado:
+                        st.success("✅ Dados extraídos e salvos no histórico com sucesso!")
+                        st.json(resultado)
