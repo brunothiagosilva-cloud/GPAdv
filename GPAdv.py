@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 # GPAdv_Web.py  —  "Meu Controle Jurídico" (Web / Supabase Enterprise)
+# Versão Unificada: Sistema Original + Motores Gemini AI + IMAP Auto-Save
 # ------------------------------------------------------------------------------------
 
 import os
@@ -18,9 +19,9 @@ from cryptography.fernet import Fernet
 
 # --- Dependências Opcionais ---
 try:
-    import openai
+    import google.generativeai as genai
 except ImportError:
-    openai = None
+    genai = None
 
 try:
     from pypdf import PdfReader
@@ -46,7 +47,7 @@ def init_connection() -> Client:
 supabase = init_connection()
 
 # ---------------- Config & Paths Locais (E-mail/Cripto) ----------------
-APP_VERSION = "32.1 (Enterprise Auth, AI & OTP Recovery Debug)"
+APP_VERSION = "36.0 (Enterprise Auth, Gemini AI, IMAP Auto-Save & OTP)"
 INSTALL_DIR = Path("C:/GerenciadorProcessos")
 DATA_DIR = INSTALL_DIR / "data"
 
@@ -56,8 +57,6 @@ for p in (INSTALL_DIR, DATA_DIR):
 CONFIG_PATH = INSTALL_DIR / "config.json"
 KEY_PATH = INSTALL_DIR / "secret.key"
 
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
-
 DEFAULT_CONFIG = {
     "email": {
         "imap_host": "imap.gmail.com",
@@ -66,10 +65,9 @@ DEFAULT_CONFIG = {
         "password_enc": "",
         "folder": "INBOX"
     },
-    "openai": {
+    "gemini": {
         "enabled": False,
-        "api_key": "",
-        "model": "gpt-4o-mini"
+        "api_key": ""
     }
 }
 
@@ -105,6 +103,15 @@ def load_config():
 
 CONFIG = load_config()
 
+# Inicializa o Gemini
+model = None
+if genai and CONFIG.get("gemini", {}).get("api_key"):
+    try:
+        genai.configure(api_key=CONFIG["gemini"]["api_key"])
+        model = genai.GenerativeModel('gemini-1.5-flash')
+    except Exception as e:
+        st.sidebar.error(f"Erro ao inicializar Gemini: {e}")
+
 # ---------------- Lógica de Negócios (CNJ, Permissões, PDF) ----------------
 def formatar_cnj(numero):
     n = re.sub(r'\D', '', numero)
@@ -121,41 +128,53 @@ def verificar_acesso(email_usuario):
     except Exception:
         return None
 
+def salvar_andamento(proc_num, desc):
+    """Função auxiliar para salvar histórico na base de dados"""
+    try:
+        now_str = datetime.datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+        supabase.table("historico_pecas").insert({
+            "numero_processo": proc_num,
+            "data_hora": now_str,
+            "descricao": desc[:1500]
+        }).execute()
+    except Exception as e:
+        st.error(f"Erro ao salvar andamento: {e}")
+
+def get_historico(proc_num):
+    """Função auxiliar para buscar histórico de um processo"""
+    try:
+        res = supabase.table("historico_pecas").select("*").eq("numero_processo", proc_num).order("data_hora", desc=True).execute()
+        return res.data
+    except Exception:
+        return []
+
 def processar_pdf_movimentacao(uploaded_file):
-    if not openai or not CONFIG.get("openai", {}).get("enabled"):
-        st.warning("Módulo OpenAI não está habilitado ou configurado.")
+    if not model:
+        st.warning("Módulo Gemini não está habilitado ou a API Key não foi configurada.")
         return None
         
     try:
         reader = PdfReader(uploaded_file)
         texto_pdf = "\n".join([page.extract_text() for page in reader.pages if page.extract_text()])
         
-        openai.api_key = CONFIG["openai"]["api_key"] or OPENAI_API_KEY
         prompt = f"""
-        Extraia as seguintes informações deste texto de movimentação processual em formato JSON:
+        Extraia as seguintes informações deste texto de movimentação processual em um formato JSON puro (sem marcações markdown):
         - numero_processo (formato CNJ)
         - data_movimentacao (DD/MM/AAAA)
         - resumo_movimentacao (texto resumido do evento)
         - possui_prazo (true ou false)
         - prazo_final (data se houver, ou texto vazio)
         
-        Texto: {texto_pdf[:4000]}
+        Texto: {texto_pdf[:6000]}
         """
         
-        resp = openai.ChatCompletion.create(
-            model=CONFIG["openai"]["model"],
-            messages=[{"role": "user", "content": prompt}]
-        )
-        
-        texto_resp = resp['choices'][0]['message']['content']
-        texto_resp = texto_resp.replace('```json', '').replace('```', '').strip()
+        resposta_ia = model.generate_content(prompt)
+        texto_resp = resposta_ia.text.replace('```json', '').replace('```', '').strip()
         dados_json = json.loads(texto_resp)
         
-        supabase.table("historico_pecas").insert({
-            "numero_processo": dados_json.get('numero_processo', ''),
-            "data_hora": dados_json.get('data_movimentacao', ''),
-            "descricao": f"Movimentação Extraída (PDF): {dados_json.get('resumo_movimentacao', '')}"
-        }).execute()
+        num_processo = dados_json.get('numero_processo', '')
+        if num_processo:
+            salvar_andamento(num_processo, f"Movimentação Extraída (PDF): {dados_json.get('resumo_movimentacao', '')}")
         
         return dados_json
     except Exception as e:
@@ -171,6 +190,8 @@ if 'perfil' not in st.session_state:
     st.session_state['perfil'] = ""
 if 'recovery_email' not in st.session_state:
     st.session_state['recovery_email'] = None
+if 'messages' not in st.session_state:
+    st.session_state['messages'] = []
 
 def login(email_input, password_input):
     try:
@@ -211,6 +232,7 @@ def logout():
     st.session_state['user_email'] = ""
     st.session_state['perfil'] = ""
     st.session_state['recovery_email'] = None
+    st.session_state['messages'] = []
     st.rerun()
 
 # ---------------- Funções de Banco de Dados (Supabase) ----------------
@@ -304,25 +326,41 @@ def read_publications_from_email():
             M.logout()
             return
 
-        matched = set()
         regex = re.compile(r"\b\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}\b")
+        processos_atualizados = 0
         
         for num in data[0].split():
             typ, msg_data = M.fetch(num, '(RFC822)')
             msg = email.message_from_bytes(msg_data[0][1])
-            body = msg.get_payload(decode=True).decode("utf-8", "ignore") if not msg.is_multipart() else ""
-            matched.update(regex.findall(body))
+            
+            body = ""
+            if msg.is_multipart():
+                for part in msg.walk():
+                    if part.get_content_type() == "text/plain":
+                        body = part.get_payload(decode=True).decode("utf-8", "ignore")
+                        break
+            else:
+                body = msg.get_payload(decode=True).decode("utf-8", "ignore")
+                
+            proc_nums = regex.findall(body)
+            
+            if proc_nums:
+                now_str = datetime.datetime.now().strftime("%Y-%m-%d")
+                for proc_num in set(proc_nums):
+                    # Atualiza o dashboard
+                    supabase.table("processos").update(
+                        {"marcado": "📩", "notif_data": now_str}
+                    ).eq("numero", proc_num).execute()
+                    
+                    # Salva o texto no histórico automaticamente
+                    resumo = f"Publicação/Notificação via E-mail:\n{body[:800]}..."
+                    salvar_andamento(proc_num, resumo)
+                    processos_atualizados += 1
         
         M.logout()
         
-        if matched:
-            now_str = datetime.datetime.now().strftime("%Y-%m-%d")
-            for proc_num in matched:
-                supabase.table("processos").update(
-                    {"marcado": "📩", "notif_data": now_str}
-                ).eq("numero", proc_num).execute()
-                
-            st.success(f"{len(matched)} publicações encontradas e marcadas nos respectivos processos!")
+        if processos_atualizados > 0:
+            st.success(f"{processos_atualizados} andamentos vinculados automaticamente via e-mail!")
         else:
             st.info("Nenhum número de processo correspondente encontrado nos e-mails.")
             
@@ -330,25 +368,16 @@ def read_publications_from_email():
         st.error(f"Falha de comunicação IMAP: {e}")
 
 def generate_piece(proc_num):
-    if not openai or not CONFIG.get("openai", {}).get("enabled"):
-        st.info(f"Mockup Mode: Petição Inicial gerada simulada para o processo {proc_num} (Módulo OpenAI desabilitado).")
+    if not model:
+        st.info(f"Mockup Mode: Petição Inicial gerada simulada para o processo {proc_num} (Módulo Gemini desabilitado).")
         return
         
     try:
-        openai.api_key = CONFIG["openai"]["api_key"] or OPENAI_API_KEY
-        resp = openai.ChatCompletion.create(
-            model=CONFIG["openai"]["model"],
-            messages=[{"role":"user", "content": f"Aja como um advogado sênior. Elabore uma Petição Inicial completa e estruturada para o processo {proc_num}. Não inclua resumos, gere a peça em sua totalidade."}]
-        )
-        texto = resp['choices'][0]['message']['content']
+        prompt = f"Aja como um advogado sênior. Elabore uma Petição Inicial completa e estruturada para o processo {proc_num}. Não inclua resumos, gere a peça em sua totalidade abordando fatos, direito e pedidos de forma genérica para preenchimento posterior."
+        resposta = model.generate_content(prompt)
+        texto = resposta.text
         
-        now = datetime.datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-        
-        supabase.table("historico_pecas").insert({
-            "numero_processo": proc_num, 
-            "data_hora": now, 
-            "descricao": "Petição Inicial (Gerada via IA)"
-        }).execute()
+        salvar_andamento(proc_num, "Petição Inicial (Gerada via IA - Gemini)")
                          
         st.success(f"Peça processual gerada para {proc_num} com sucesso!")
         with st.expander("Visualizar Documento Gerado", expanded=True):
@@ -356,7 +385,7 @@ def generate_piece(proc_num):
             st.download_button("Baixar Texto (TXT)", data=texto, file_name=f"Petição_{proc_num}.txt", mime="text/plain")
             
     except Exception as e:
-        st.error(f"Erro na API da OpenAI: {e}")
+        st.error(f"Erro na API do Gemini: {e}")
 
 
 # ==============================================================================
@@ -408,7 +437,6 @@ if not st.session_state['authenticated']:
                                 st.session_state['recovery_email'] = rec_email 
                                 st.success("E-mail enviado! Verifique o código numérico na sua caixa de entrada (ou spam).")
                             except Exception as e:
-                                # AQUI ESTÁ A CORREÇÃO CRÍTICA PARA MOSTRAR O ERRO REAL:
                                 st.error(f"Erro detalhado do Supabase: {e}")
                     else:
                         st.warning("Por favor, insira o seu e-mail de acesso.")
@@ -442,7 +470,7 @@ else:
     with st.sidebar:
         st.markdown(f"👤 **Usuário:** {st.session_state['user_email']}")
         st.markdown(f"🛡️ **Perfil:** {str(st.session_state.get('perfil', 'usuario')).capitalize()}")
-        if st.button("Sair do Sistema", use_container_width=True):
+        if st.button("🚪 Sair do Sistema", use_container_width=True):
             logout()
             
         st.divider()
@@ -473,9 +501,39 @@ else:
         st.divider()
         
         if st.button("📧 Sincronizar Publicações (IMAP)", use_container_width=True):
-            with st.spinner("Varrendo caixa de entrada..."):
+            with st.spinner("Varrendo caixa de entrada e aplicando IA..."):
                 read_publications_from_email()
                 st.rerun()
+
+        st.divider()
+
+        # Módulo de Chat RAG (Gemini) na Sidebar
+        st.markdown("### 🤖 Assistente Gemini")
+        for msg in st.session_state.messages:
+            with st.chat_message(msg["role"]): 
+                st.markdown(msg["content"])
+                
+        if prompt := st.chat_input("Pergunte sobre os processos..."):
+            if not model:
+                st.error("Configure a API Key do Gemini em Configurações.")
+            else:
+                st.session_state.messages.append({"role": "user", "content": prompt})
+                with st.chat_message("user"): 
+                    st.markdown(prompt)
+                
+                df_context = load_data()
+                contexto_txt = df_context.to_string(index=False) if not df_context.empty else "Nenhum processo."
+                
+                with st.chat_message("assistant"):
+                    with st.spinner("Consultando dados..."):
+                        try:
+                            chat_sess = model.start_chat(history=[])
+                            prompt_completo = f"Você é o assistente jurídico GPAdv. Responda baseando-se NESTA tabela:\n{contexto_txt}\n\nPergunta: {prompt}"
+                            resposta = chat_sess.send_message(prompt_completo)
+                            st.markdown(resposta.text)
+                            st.session_state.messages.append({"role": "assistant", "content": resposta.text})
+                        except Exception as e:
+                            st.error(f"Erro na IA: {e}")
 
     # --- Área Principal (Tabs Superiores) ---
     st.title(f"⚖️ GPAdv")
@@ -526,7 +584,7 @@ else:
                                     st.rerun()
 
         st.write("### Base de Dados")
-        st.caption("Edição Inline: Dê um duplo clique em qualquer célula para editar e pressione Enter. As alterações são sincronizadas em tempo real com a nuvem.")
+        st.caption("Edição Inline: Dê um duplo clique em qualquer célula para editar e pressione Enter. Utilize a lateral da linha para excluir registros.")
 
         if df.empty:
             st.info("O banco de dados está vazio. Utilize o formulário lateral para adicionar registros ou importe uma planilha Excel.")
@@ -567,19 +625,32 @@ else:
                     st.rerun()
 
         st.divider()
-        st.write("### 🧠 Módulo de Engenharia Jurídica (IA)")
-        col_ai1, col_ai2 = st.columns([1, 2])
+        
+        # Módulo da Linha do Tempo e Geração de Peça
+        st.write("### 📜 Linha do Tempo & Engenharia Jurídica (IA)")
+        col_hist, col_ai = st.columns([2, 1])
 
-        with col_ai1:
-            if not df.empty:
-                processos_lista = df["numero"].tolist()
-                processo_selecionado = st.selectbox("Selecione o processo alvo para redação:", processos_lista)
-                
-                if st.button("Gerar Petição Inicial Completa", type="primary", use_container_width=True):
-                    with st.spinner("Processando lógica jurídica e redigindo documento..."):
-                        generate_piece(processo_selecionado)
+        with col_hist:
+            proc_list = df["numero"].tolist() if not df.empty else []
+            proc_escolhido = st.selectbox("Selecione um processo para visualizar o histórico de andamentos:", proc_list)
+            
+            if proc_escolhido:
+                hist_dados = get_historico(proc_escolhido)
+                if hist_dados:
+                    for item in hist_dados:
+                        with st.expander(f"🗓️ {item.get('data_hora', '')} - Visualizar Teor"):
+                            st.write(item.get('descricao', ''))
+                else:
+                    st.info("Ainda não há movimentações registradas (via E-mail ou PDF) para este processo.")
+
+        with col_ai:
+            st.write("<br>", unsafe_allow_html=True)
+            if proc_escolhido:
+                if st.button("Gerar Petição Inicial (IA)", type="primary", use_container_width=True):
+                    with st.spinner("Processando lógica jurídica..."):
+                        generate_piece(proc_escolhido)
             else:
-                st.warning("Necessário cadastrar processos para utilizar o módulo de IA.")
+                st.warning("Selecione um processo ao lado para redigir a peça.")
 
     # ---------------- TAB 2: CONFIGURAÇÕES PESSOAIS ----------------
     with tab_config:
@@ -587,41 +658,39 @@ else:
         
         with col_conf1:
             st.subheader("⚙️ Integração de E-mail (IMAP)")
-            st.write("Estas credenciais são exclusivas para o seu usuário e serão salvas de forma segura no banco de dados.")
+            st.write("Configuração para o auto-save de publicações.")
             with st.container(border=True):
                 email_imap = st.text_input("Seu E-mail Profissional (Ex: seuemail@gmail.com)")
                 pwd_imap = st.text_input("Senha de Aplicativo (App Password)", type="password")
                 
-                if st.button("Salvar Minhas Configurações", type="primary"):
+                if st.button("Salvar E-mail IMAP", type="primary"):
                     if email_imap and pwd_imap:
                         supabase.table("configuracoes").upsert({
                             "usuario_email": st.session_state['user_email'],
                             "imap_email": email_imap,
                             "imap_pwd": pwd_imap
                         }).execute()
-                        st.success("Configurações IMAP vinculadas ao seu perfil com sucesso!")
+                        st.success("Configurações IMAP vinculadas ao seu perfil!")
                     else:
                         st.warning("Preencha o e-mail e a senha para salvar.")
 
         with col_conf2:
-            st.subheader("🔑 Alterar Minha Senha")
-            st.write("Caso você deseje trocar sua credencial de acesso atual de forma manual.")
+            st.subheader("🤖 Configuração Gemini (Google AI Studio)")
+            st.write("Habilita o Chat Inteligente e a Leitura de PDF.")
             with st.container(border=True):
-                nova_senha_update = st.text_input("Nova Senha de Acesso", type="password", key="new_pwd_update")
-                if st.button("Atualizar Senha", type="primary", use_container_width=True):
-                    if len(nova_senha_update) >= 6:
-                        try:
-                            supabase.auth.update_user({"password": nova_senha_update})
-                            st.success("Senha atualizada no banco de dados com sucesso!")
-                        except Exception as e:
-                            st.error(f"Erro ao atualizar senha: {e}")
-                    else:
-                        st.warning("A senha deve ter no mínimo 6 caracteres.")
+                gemini_key = st.text_input("Sua Chave API (AIzaSy...)", value=CONFIG.get("gemini", {}).get("api_key", ""), type="password")
+                
+                if st.button("Habilitar Gemini AI", type="primary", use_container_width=True):
+                    CONFIG["gemini"]["api_key"] = gemini_key
+                    CONFIG["gemini"]["enabled"] = True if gemini_key else False
+                    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+                        json.dump(CONFIG, f, ensure_ascii=False, indent=2)
+                    st.success("Configuração de IA salva localmente! O assistente já está pronto.")
 
     # ---------------- TAB 3: INTELIGÊNCIA DE PDF ----------------
     with tab_ia:
         st.subheader("🤖 Extrator de Movimentações (PDF)")
-        st.write("Faça o upload do documento de movimentação do tribunal. A inteligência artificial lerá o PDF, identificará o número do processo, prazos e registrará o histórico automaticamente no seu banco de dados.")
+        st.write("Faça o upload do documento. O Gemini lerá o PDF, identificará o processo, resumirá o teor e salvará automaticamente na Linha do Tempo.")
         
         uploaded_pdf = st.file_uploader("Selecione o arquivo PDF", type=["pdf"])
         
