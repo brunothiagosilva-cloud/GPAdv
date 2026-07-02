@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # GPAdv_Web.py  —  "Meu Controle Jurídico" (Web / Supabase Enterprise)
-# Versão Unificada: Sistema Original + Motores Gemini AI + IMAP Auto-Save
+# Versão Unificada: Sistema Original + Motores Gemini AI + IMAP Auto-Save + Prevenção KeyError
 # ------------------------------------------------------------------------------------
 
 import os
@@ -47,7 +47,7 @@ def init_connection() -> Client:
 supabase = init_connection()
 
 # ---------------- Config & Paths Locais (E-mail/Cripto) ----------------
-APP_VERSION = "36.0 (Enterprise Auth, Gemini AI, IMAP Auto-Save & OTP)"
+APP_VERSION = "36.1 (Enterprise Auth, Gemini AI, IMAP Auto-Save & OTP)"
 INSTALL_DIR = Path("C:/GerenciadorProcessos")
 DATA_DIR = INSTALL_DIR / "data"
 
@@ -97,6 +97,11 @@ def load_config():
     try:
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
             cfg = json.load(f)
+            # Verificação e inserção automática de chaves ausentes
+            if "gemini" not in cfg:
+                cfg["gemini"] = {"enabled": False, "api_key": ""}
+            if "email" not in cfg:
+                cfg["email"] = {"imap_host": "imap.gmail.com", "imap_port": 993, "username": "", "password_enc": "", "folder": "INBOX"}
         return cfg
     except:
         return DEFAULT_CONFIG
@@ -681,6 +686,8 @@ else:
                 gemini_key = st.text_input("Sua Chave API (AIzaSy...)", value=CONFIG.get("gemini", {}).get("api_key", ""), type="password")
                 
                 if st.button("Habilitar Gemini AI", type="primary", use_container_width=True):
+                    if "gemini" not in CONFIG:
+                        CONFIG["gemini"] = {}
                     CONFIG["gemini"]["api_key"] = gemini_key
                     CONFIG["gemini"]["enabled"] = True if gemini_key else False
                     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
