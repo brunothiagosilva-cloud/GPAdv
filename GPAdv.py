@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # GPAdv_Web.py  —  "Meu Controle Jurídico" (Web / Supabase Enterprise)
-# Versão Unificada: 36.4 (Auto-Update Parte, Smart Import & AI Auto-Discovery)
+# Versão Unificada: 36.5 (Grid History, Auto-Refresh & AI Auto-Discovery)
 # ------------------------------------------------------------------------------------
 
 import os
@@ -10,6 +10,7 @@ import imaplib
 import email
 import datetime
 import io
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -105,19 +106,14 @@ def load_config():
 
 CONFIG = load_config()
 
-# --- Motor de IA com Auto-Discovery (Solução Definitiva 404) ---
+# --- Motor de IA com Auto-Discovery ---
 def gerar_conteudo_ia(prompt):
-    """
-    Em vez de adivinhar o nome do modelo e causar erro 404, esta função consulta 
-    o Google para saber quais modelos estão disponíveis e usa o melhor encontrado.
-    """
     api_key = CONFIG.get("gemini", {}).get("api_key")
     if not genai or not api_key:
         raise ValueError("A API Key da Inteligência Artificial não foi configurada.")
         
     genai.configure(api_key=api_key)
     
-    # Busca a lista oficial de modelos autorizados para esta chave
     modelos_disponiveis = []
     for m in genai.list_models():
         if 'generateContent' in m.supported_generation_methods:
@@ -126,7 +122,6 @@ def gerar_conteudo_ia(prompt):
     if not modelos_disponiveis:
         raise Exception("Sua chave de API não tem permissão para nenhum modelo de geração.")
 
-    # Ordem de preferência: Tenta o mais inteligente/rápido primeiro
     modelo_escolhido = None
     preferencias = ['models/gemini-1.5-flash', 'models/gemini-1.5-pro', 'models/gemini-1.0-pro', 'models/gemini-pro']
     
@@ -135,7 +130,6 @@ def gerar_conteudo_ia(prompt):
             modelo_escolhido = pref
             break
             
-    # Se nenhum dos preferidos existir, usa o primeiro que o Google devolver
     if not modelo_escolhido:
         modelo_escolhido = modelos_disponiveis[0]
 
@@ -197,15 +191,16 @@ def processar_pdf_movimentacao(uploaded_file):
         texto_resp = resposta_ia.text.replace('```json', '').replace('```', '').strip()
         dados_json = json.loads(texto_resp)
         
-        num_processo = dados_json.get('numero_processo', '')
+        num_processo = formatar_cnj(dados_json.get('numero_processo', ''))
         nome_extraido = dados_json.get('nome_parte', '')
         
         if num_processo:
             salvar_andamento(num_processo, f"Movimentação Extraída (PDF): {dados_json.get('resumo_movimentacao', '')}")
             
             if nome_extraido and len(nome_extraido.strip()) > 3:
+                # Atualiza nome da parte no Supabase
                 supabase.table("processos").update({"parte": nome_extraido.strip()}).eq("numero", num_processo).execute()
-                st.toast(f"Nome da parte atualizado automaticamente para: {nome_extraido}")
+                st.session_state['temp_toast'] = f"Nome atualizado para: {nome_extraido.strip()}"
         
         return dados_json
     except Exception as e:
@@ -213,16 +208,13 @@ def processar_pdf_movimentacao(uploaded_file):
         return None
 
 # ---------------- Gestão de Estado da Sessão (Autenticação) ----------------
-if 'authenticated' not in st.session_state:
-    st.session_state['authenticated'] = False
-if 'user_email' not in st.session_state:
-    st.session_state['user_email'] = ""
-if 'perfil' not in st.session_state:
-    st.session_state['perfil'] = ""
-if 'recovery_email' not in st.session_state:
-    st.session_state['recovery_email'] = None
-if 'messages' not in st.session_state:
-    st.session_state['messages'] = []
+if 'authenticated' not in st.session_state: st.session_state['authenticated'] = False
+if 'user_email' not in st.session_state: st.session_state['user_email'] = ""
+if 'perfil' not in st.session_state: st.session_state['perfil'] = ""
+if 'recovery_email' not in st.session_state: st.session_state['recovery_email'] = None
+if 'messages' not in st.session_state: st.session_state['messages'] = []
+if 'temp_toast' not in st.session_state: st.session_state['temp_toast'] = ""
+if 'pdf_json_result' not in st.session_state: st.session_state['pdf_json_result'] = None
 
 def login(email_input, password_input):
     try:
@@ -249,21 +241,40 @@ def signup(email_input, password_input):
         st.error(f"Falha ao realizar cadastro. (Erro: {e})")
 
 def logout():
-    try:
-        supabase.auth.sign_out()
-    except Exception:
-        pass
+    try: supabase.auth.sign_out()
+    except Exception: pass
     st.session_state.clear()
     st.rerun()
 
 # ---------------- Funções de Banco de Dados (Supabase) ----------------
 def load_data():
+    """Carrega dados e cruza com a última movimentação para exibir na grid"""
     try:
         response = supabase.table("processos").select("*").order("id", desc=True).execute()
-        if response.data:
-            return pd.DataFrame(response.data)
+        if not response.data:
+            return pd.DataFrame(columns=["id", "numero", "tribunal", "parte", "situacao", "prazo", "observacoes", "marcado", "cor_card", "notif_data", "ultima_mov"])
+            
+        df_proc = pd.DataFrame(response.data)
+        
+        # Busca histórico para mesclar a última movimentação
+        hist_res = supabase.table("historico_pecas").select("numero_processo, data_hora, descricao").order("data_hora", desc=True).execute()
+        
+        if hist_res.data:
+            df_hist = pd.DataFrame(hist_res.data)
+            # Mantém apenas a primeira ocorrência (a mais recente) de cada processo
+            df_hist_latest = df_hist.drop_duplicates(subset=['numero_processo'], keep='first')
+            
+            # Formata o texto para exibir na tabela
+            df_hist_latest['ultima_mov'] = df_hist_latest['data_hora'].str[:10] + " - " + df_hist_latest['descricao'].str[:100] + "..."
+            
+            # Mescla com o dataframe principal
+            df_proc = pd.merge(df_proc, df_hist_latest[['numero_processo', 'ultima_mov']], left_on='numero', right_on='numero_processo', how='left')
+            df_proc['ultima_mov'] = df_proc['ultima_mov'].fillna('Sem histórico')
+            df_proc = df_proc.drop(columns=['numero_processo'])
         else:
-            return pd.DataFrame(columns=["id", "numero", "tribunal", "parte", "situacao", "prazo", "observacoes", "marcado", "cor_card", "notif_data"])
+            df_proc['ultima_mov'] = 'Sem histórico'
+            
+        return df_proc
     except Exception as e:
         st.error(f"Erro ao carregar dados do banco: {e}")
         return pd.DataFrame()
@@ -272,11 +283,12 @@ def load_data():
 def export_to_excel(df: pd.DataFrame) -> bytes:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df.to_excel(writer, index=False, sheet_name='Processos_GPAdv')
+        df_export = df.drop(columns=['id', 'ultima_mov'], errors='ignore')
+        df_export.to_excel(writer, index=False, sheet_name='Processos_GPAdv')
         workbook = writer.book
         worksheet = writer.sheets['Processos_GPAdv']
         header_format = workbook.add_format({'bold': True, 'bg_color': '#D7E4BC', 'border': 1})
-        for col_num, value in enumerate(df.columns.values):
+        for col_num, value in enumerate(df_export.columns.values):
             worksheet.write(0, col_num, value, header_format)
             worksheet.set_column(col_num, col_num, 20)
     return output.getvalue()
@@ -406,6 +418,11 @@ def generate_piece(proc_num):
 # RENDERIZAÇÃO DA INTERFACE PRINCIPAL
 # ==============================================================================
 
+# Exibe toast persistente se existir
+if st.session_state['temp_toast']:
+    st.toast(st.session_state['temp_toast'], icon="✅")
+    st.session_state['temp_toast'] = ""
+
 if not st.session_state.get('authenticated'):
     st.markdown("<h1 style='text-align: center; margin-top: 5vh;'>⚖️ GPAdv</h1>", unsafe_allow_html=True)
     st.markdown("<h4 style='text-align: center; color: gray;'>Sistema Corporativo de Gestão Jurídica</h4>", unsafe_allow_html=True)
@@ -418,7 +435,6 @@ if not st.session_state.get('authenticated'):
             with tab1:
                 auth_email = st.text_input("E-mail corporativo", key="log_email")
                 auth_senha = st.text_input("Senha", type="password", key="log_pwd")
-                
                 if st.button("Acessar", type="primary", use_container_width=True):
                     if auth_email and auth_senha:
                         with st.spinner("Autenticando..."): login(auth_email, auth_senha)
@@ -497,7 +513,6 @@ else:
 
         st.divider()
 
-        # Módulo de Chat RAG
         st.markdown("### 🤖 Assistente Gemini")
         for msg in st.session_state.messages:
             with st.chat_message(msg["role"]): st.markdown(msg["content"])
@@ -524,7 +539,7 @@ else:
     
     with col_t1:
         st.title("⚖️ GPAdv")
-        st.caption("Versão Corporativa 36.4 (Auto-Update Parte, Smart Import & AI Robustness)")
+        st.caption("Versão Corporativa 36.5 (Grid History, Auto-Refresh & AI Auto-Discovery)")
         
     with col_t2:
         if st.button("🔄 Atualizar", use_container_width=True):
@@ -533,15 +548,15 @@ else:
     with col_t3:
         with st.popover("📜 Histórico de Versão", use_container_width=True):
             st.markdown("""
-            **Resumo de Funcionalidades (v36.4)**
-            * **Motor IA (Auto-Discovery):** Fim dos erros 404. O sistema agora consulta o Google em tempo real para utilizar o modelo compatível mais avançado.
-            * **Extração PDF (Auto-Update):** Ao ler um PDF, a IA identifica o nome completo da parte e atualiza a tabela automaticamente.
+            **Resumo de Funcionalidades (v36.5)**
+            * **Histórico no Grid (NOVO):** A tabela principal agora exibe a última movimentação de cada processo em tempo real.
+            * **Auto-Refresh Inteligente (NOVO):** O sistema agora recarrega a tabela e o nome da parte automaticamente assim que a IA termina de ler o PDF.
+            * **Motor IA (Auto-Discovery):** Fim dos erros 404. O sistema consulta o Google em tempo real para usar o modelo compatível.
             * **Smart Import (Excel):** Importação inteligente que aceita colunas variadas e reconhece o CNJ dinamicamente.
-            * **Auto-Save E-mail (IMAP):** Cada usuário conecta seu próprio e-mail corporativo. O sistema varre a caixa, extrai a publicação e salva na linha do tempo do processo.
-            * **Segurança AuthOTP:** Recuperação de senha por PIN numérico diretamente integrada com a nuvem.
+            * **Auto-Save E-mail (IMAP):** Captura automática da caixa de entrada direto para a linha do tempo.
             """)
 
-    st.write("") # Espaçamento
+    st.write("")
     tab_dash, tab_config, tab_ia = st.tabs(["📊 Dashboard Central", "⚙️ Configurações Pessoais", "🤖 Inteligência de Documentos (PDF)"])
 
     # ---------------- TAB 1: DASHBOARD CENTRAL ----------------
@@ -576,10 +591,11 @@ else:
                             with st.spinner("Processando..."):
                                 if import_from_excel(uploaded_file):
                                     st.success("Importação concluída!")
+                                    time.sleep(1)
                                     st.rerun()
 
         st.write("### Base de Dados")
-        st.caption("Edição Inline: Dê um duplo clique em qualquer célula para editar e pressione Enter. Utilize a lateral da linha para excluir registros.")
+        st.caption("Edição Inline: Dê um duplo clique para editar. Nova coluna 'Último Histórico' exibe a movimentação mais recente.")
 
         if df.empty:
             st.info("O banco de dados está vazio. Utilize o formulário lateral para adicionar registros ou importe uma planilha Excel.")
@@ -593,6 +609,7 @@ else:
                     "id": None, "cor_card": None, "notif_data": None,
                     "numero": st.column_config.TextColumn("Número (CNJ)", required=True),
                     "situacao": st.column_config.SelectboxColumn("Status", options=["Em Andamento", "Arquivado", "Suspenso", "Concluído"]),
+                    "ultima_mov": st.column_config.TextColumn("Último Histórico", disabled=True, width="large"),
                 },
                 key="process_editor"
             )
@@ -624,7 +641,7 @@ else:
 
         with col_hist:
             proc_list = df["numero"].tolist() if not df.empty else []
-            proc_escolhido = st.selectbox("Selecione um processo para visualizar o histórico de andamentos:", proc_list)
+            proc_escolhido = st.selectbox("Selecione um processo para visualizar o histórico de andamentos completo:", proc_list)
             
             if proc_escolhido:
                 hist_dados = get_historico(proc_escolhido)
@@ -689,9 +706,18 @@ else:
         uploaded_pdf = st.file_uploader("Selecione o arquivo PDF", type=["pdf"])
         
         if uploaded_pdf is not None:
-            if st.button("Processar Movimentação via IA", type="primary", use_container_width=True):
-                with st.spinner("Consultando servidores do Google e extraindo dados..."):
-                    resultado = processar_pdf_movimentacao(uploaded_pdf)
-                    if resultado:
-                        st.success("✅ Dados extraídos e salvos no histórico com sucesso!")
-                        st.json(resultado)
+            # Se já temos um resultado processado na sessão para este upload, exibimos
+            if st.session_state['pdf_json_result']:
+                st.success("✅ Dados extraídos e salvos no histórico com sucesso!")
+                st.json(st.session_state['pdf_json_result'])
+                
+                if st.button("Limpar e Processar Novo", type="secondary"):
+                    st.session_state['pdf_json_result'] = None
+                    st.rerun()
+            else:
+                if st.button("Processar Movimentação via IA", type="primary", use_container_width=True):
+                    with st.spinner("Consultando servidores do Google e extraindo dados..."):
+                        resultado = processar_pdf_movimentacao(uploaded_pdf)
+                        if resultado:
+                            st.session_state['pdf_json_result'] = resultado
+                            st.rerun() # Força o refresh da tela inteira (incluindo a tabela) imediatamente
