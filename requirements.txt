@@ -6,3 +6,4 @@ openai
 openpyxl
 xlsxwriter
 pypdf
+google-generativeai
