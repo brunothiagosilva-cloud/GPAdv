@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # GPAdv_Web.py  —  "Meu Controle Jurídico" (Web / Supabase Enterprise)
-# Versão Unificada: 36.4 (Smart Import, UI Alignment, Model Fallback Fix & Auto-Update Parte)
+# Versão Unificada: 36.4 (Auto-Update Parte, Smart Import & AI Auto-Discovery)
 # ------------------------------------------------------------------------------------
 
 import os
@@ -46,7 +46,6 @@ def init_connection() -> Client:
 supabase = init_connection()
 
 # ---------------- Config & Paths Locais (E-mail/Cripto) ----------------
-APP_VERSION = "36.4 (Auto-Update Parte, Smart Import & AI Robustness)"
 INSTALL_DIR = Path("C:/GerenciadorProcessos")
 DATA_DIR = INSTALL_DIR / "data"
 
@@ -106,24 +105,42 @@ def load_config():
 
 CONFIG = load_config()
 
-# Configuração Base do Gemini
-if genai and CONFIG.get("gemini", {}).get("api_key"):
-    try:
-        genai.configure(api_key=CONFIG["gemini"]["api_key"])
-    except Exception as e:
-        st.sidebar.error(f"Erro ao inicializar API do Google: {e}")
-
-# --- Motor de IA com Fallback Integrado ---
+# --- Motor de IA com Auto-Discovery (Solução Definitiva 404) ---
 def gerar_conteudo_ia(prompt):
-    """Tenta usar o modelo 1.5 Flash. Se der 404, cai para o modelo PRO universal."""
-    try:
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        return model.generate_content(prompt)
-    except Exception as e:
-        if '404' in str(e) or 'not found' in str(e).lower():
-            model_fallback = genai.GenerativeModel('gemini-pro')
-            return model_fallback.generate_content(prompt)
-        raise e
+    """
+    Em vez de adivinhar o nome do modelo e causar erro 404, esta função consulta 
+    o Google para saber quais modelos estão disponíveis e usa o melhor encontrado.
+    """
+    api_key = CONFIG.get("gemini", {}).get("api_key")
+    if not genai or not api_key:
+        raise ValueError("A API Key da Inteligência Artificial não foi configurada.")
+        
+    genai.configure(api_key=api_key)
+    
+    # Busca a lista oficial de modelos autorizados para esta chave
+    modelos_disponiveis = []
+    for m in genai.list_models():
+        if 'generateContent' in m.supported_generation_methods:
+            modelos_disponiveis.append(m.name)
+            
+    if not modelos_disponiveis:
+        raise Exception("Sua chave de API não tem permissão para nenhum modelo de geração.")
+
+    # Ordem de preferência: Tenta o mais inteligente/rápido primeiro
+    modelo_escolhido = None
+    preferencias = ['models/gemini-1.5-flash', 'models/gemini-1.5-pro', 'models/gemini-1.0-pro', 'models/gemini-pro']
+    
+    for pref in preferencias:
+        if pref in modelos_disponiveis:
+            modelo_escolhido = pref
+            break
+            
+    # Se nenhum dos preferidos existir, usa o primeiro que o Google devolver
+    if not modelo_escolhido:
+        modelo_escolhido = modelos_disponiveis[0]
+
+    model = genai.GenerativeModel(modelo_escolhido)
+    return model.generate_content(prompt)
 
 # ---------------- Lógica de Negócios (CNJ, Permissões, PDF) ----------------
 def formatar_cnj(numero):
@@ -142,7 +159,6 @@ def verificar_acesso(email_usuario):
         return None
 
 def salvar_andamento(proc_num, desc):
-    """Salva histórico na base de dados"""
     try:
         now_str = datetime.datetime.now().strftime("%d/%m/%Y %H:%M:%S")
         supabase.table("historico_pecas").insert({
@@ -154,7 +170,6 @@ def salvar_andamento(proc_num, desc):
         st.error(f"Erro ao salvar andamento: {e}")
 
 def get_historico(proc_num):
-    """Busca histórico de um processo"""
     try:
         res = supabase.table("historico_pecas").select("*").eq("numero_processo", proc_num).order("data_hora", desc=True).execute()
         return res.data
@@ -162,10 +177,6 @@ def get_historico(proc_num):
         return []
 
 def processar_pdf_movimentacao(uploaded_file):
-    if not genai or not CONFIG.get("gemini", {}).get("api_key"):
-        st.warning("A API Key da Inteligência Artificial não foi configurada.")
-        return None
-        
     try:
         reader = PdfReader(uploaded_file)
         texto_pdf = "\n".join([page.extract_text() for page in reader.pages if page.extract_text()])
@@ -190,17 +201,15 @@ def processar_pdf_movimentacao(uploaded_file):
         nome_extraido = dados_json.get('nome_parte', '')
         
         if num_processo:
-            # 1. Salva o histórico
             salvar_andamento(num_processo, f"Movimentação Extraída (PDF): {dados_json.get('resumo_movimentacao', '')}")
             
-            # 2. Atualiza a Parte automaticamente no banco se a IA encontrou o nome completo
             if nome_extraido and len(nome_extraido.strip()) > 3:
                 supabase.table("processos").update({"parte": nome_extraido.strip()}).eq("numero", num_processo).execute()
                 st.toast(f"Nome da parte atualizado automaticamente para: {nome_extraido}")
         
         return dados_json
     except Exception as e:
-        st.error(f"Erro ao processar PDF via IA: {e}")
+        st.error(f"Erro detalhado ao processar PDF via IA: {e}")
         return None
 
 # ---------------- Gestão de Estado da Sessão (Autenticação) ----------------
@@ -217,10 +226,7 @@ if 'messages' not in st.session_state:
 
 def login(email_input, password_input):
     try:
-        response = supabase.auth.sign_in_with_password({
-            "email": email_input,
-            "password": password_input
-        })
+        response = supabase.auth.sign_in_with_password({"email": email_input, "password": password_input})
         if response.user:
             acesso = verificar_acesso(response.user.email)
             if acesso:
@@ -232,15 +238,12 @@ def login(email_input, password_input):
             else:
                 st.error("Acesso não autorizado para este e-mail. Solicite liberação ao administrador.")
                 supabase.auth.sign_out()
-    except Exception as e:
-        st.error(f"Falha na autenticação: Verifique suas credenciais.")
+    except Exception:
+        st.error("Falha na autenticação: Verifique suas credenciais.")
 
 def signup(email_input, password_input):
     try:
-        response = supabase.auth.sign_up({
-            "email": email_input,
-            "password": password_input
-        })
+        supabase.auth.sign_up({"email": email_input, "password": password_input})
         st.success("🎉 Cadastro realizado com sucesso! Aguarde a liberação do seu e-mail no banco de dados para entrar.")
     except Exception as e:
         st.error(f"Falha ao realizar cadastro. (Erro: {e})")
@@ -250,11 +253,7 @@ def logout():
         supabase.auth.sign_out()
     except Exception:
         pass
-    st.session_state['authenticated'] = False
-    st.session_state['user_email'] = ""
-    st.session_state['perfil'] = ""
-    st.session_state['recovery_email'] = None
-    st.session_state['messages'] = []
+    st.session_state.clear()
     st.rerun()
 
 # ---------------- Funções de Banco de Dados (Supabase) ----------------
@@ -276,19 +275,15 @@ def export_to_excel(df: pd.DataFrame) -> bytes:
         df.to_excel(writer, index=False, sheet_name='Processos_GPAdv')
         workbook = writer.book
         worksheet = writer.sheets['Processos_GPAdv']
-        
         header_format = workbook.add_format({'bold': True, 'bg_color': '#D7E4BC', 'border': 1})
         for col_num, value in enumerate(df.columns.values):
             worksheet.write(0, col_num, value, header_format)
             worksheet.set_column(col_num, col_num, 20)
-            
     return output.getvalue()
 
 def import_from_excel(uploaded_file):
     try:
         df_import = pd.read_excel(uploaded_file, engine='openpyxl')
-        
-        # Normaliza os nomes das colunas
         df_import.columns = [str(c).lower().strip() for c in df_import.columns]
         
         if "numero" not in df_import.columns and "número" not in df_import.columns and "cnj" not in df_import.columns:
@@ -297,15 +292,14 @@ def import_from_excel(uploaded_file):
             
         df_import = df_import.fillna("")
         registros = df_import.to_dict(orient="records")
-        
         registros_limpos = []
+        
         for reg in registros:
             num_raw = reg.get("numero", reg.get("número", reg.get("cnj", "")))
             if not num_raw: 
                 continue 
                 
             num_formatado = formatar_cnj(str(num_raw))
-            
             registros_limpos.append({
                 "numero": num_formatado,
                 "tribunal": str(reg.get("tribunal", "TJ-SP")),
@@ -324,7 +318,6 @@ def import_from_excel(uploaded_file):
         else:
             st.warning("Não foram encontrados números válidos para importação.")
             return False
-            
     except Exception as e:
         st.error(f"Erro ao processar o arquivo Excel: {e}")
         return False
@@ -343,11 +336,8 @@ def read_publications_from_email():
         st.error(f"Erro ao buscar configurações de e-mail: {e}")
         return
 
-    imap_host = "imap.gmail.com"
-    imap_port = 993
-
     try:
-        M = imaplib.IMAP4_SSL(imap_host, imap_port)
+        M = imaplib.IMAP4_SSL("imap.gmail.com", 993)
         M.login(imap_user, imap_pwd)
         M.select('"INBOX"')
         
@@ -387,7 +377,6 @@ def read_publications_from_email():
                     processos_atualizados += 1
         
         M.logout()
-        
         if processos_atualizados > 0:
             st.success(f"{processos_atualizados} andamentos vinculados automaticamente via e-mail!")
         else:
@@ -397,10 +386,6 @@ def read_publications_from_email():
         st.error(f"Falha de comunicação IMAP: {e}")
 
 def generate_piece(proc_num):
-    if not genai or not CONFIG.get("gemini", {}).get("api_key"):
-        st.info(f"Mockup Mode: Petição Inicial gerada simulada para o processo {proc_num} (Módulo Gemini desabilitado).")
-        return
-        
     try:
         prompt = f"Aja como um advogado sênior. Elabore uma Petição Inicial completa e estruturada para o processo {proc_num}. Não inclua resumos, gere a peça em sua totalidade abordando fatos, direito e pedidos de forma genérica para preenchimento posterior."
         resposta = gerar_conteudo_ia(prompt)
@@ -421,8 +406,7 @@ def generate_piece(proc_num):
 # RENDERIZAÇÃO DA INTERFACE PRINCIPAL
 # ==============================================================================
 
-if not st.session_state['authenticated']:
-    # TELA DE LOGIN / CADASTRO / RECUPERAÇÃO
+if not st.session_state.get('authenticated'):
     st.markdown("<h1 style='text-align: center; margin-top: 5vh;'>⚖️ GPAdv</h1>", unsafe_allow_html=True)
     st.markdown("<h4 style='text-align: center; color: gray;'>Sistema Corporativo de Gestão Jurídica</h4>", unsafe_allow_html=True)
     
@@ -437,64 +421,47 @@ if not st.session_state['authenticated']:
                 
                 if st.button("Acessar", type="primary", use_container_width=True):
                     if auth_email and auth_senha:
-                        with st.spinner("Autenticando e verificando permissões..."):
-                            login(auth_email, auth_senha)
+                        with st.spinner("Autenticando..."): login(auth_email, auth_senha)
                     else:
                         st.warning("Preencha todos os campos para entrar.")
                         
             with tab2:
-                st.markdown("Crie sua conta para acessar a plataforma.")
                 new_email = st.text_input("Novo e-mail", key="reg_email")
                 new_senha = st.text_input("Crie uma senha (mínimo 6 caracteres)", type="password", key="reg_pwd")
-                
                 if st.button("Criar Conta", use_container_width=True):
                     if new_email and len(new_senha) >= 6:
-                        with st.spinner("Registrando..."):
-                            signup(new_email, new_senha)
+                        with st.spinner("Registrando..."): signup(new_email, new_senha)
                     else:
-                        st.warning("Preencha um e-mail válido e uma senha com no mínimo 6 caracteres.")
+                        st.warning("Preencha um e-mail válido e senha maior que 6 caracteres.")
                         
             with tab3:
-                st.markdown("Insira seu e-mail para receber um código numérico de recuperação.")
                 rec_email = st.text_input("E-mail corporativo", key="rec_email")
-                
-                if st.button("Enviar Código de Recuperação", use_container_width=True):
+                if st.button("Enviar Código", use_container_width=True):
                     if rec_email:
-                        with st.spinner("Solicitando código seguro..."):
-                            try:
-                                supabase.auth.reset_password_for_email(rec_email)
-                                st.session_state['recovery_email'] = rec_email 
-                                st.success("E-mail enviado! Verifique o código numérico na sua caixa de entrada.")
-                            except Exception as e:
-                                st.error(f"Erro detalhado do Supabase: {e}")
+                        try:
+                            supabase.auth.reset_password_for_email(rec_email)
+                            st.session_state['recovery_email'] = rec_email 
+                            st.success("E-mail enviado! Verifique o código numérico.")
+                        except Exception as e:
+                            st.error(f"Erro: {e}")
                     else:
-                        st.warning("Por favor, insira o seu e-mail de acesso.")
+                        st.warning("Insira o seu e-mail.")
                 
                 if st.session_state.get('recovery_email'):
                     st.divider()
-                    st.markdown("### 2. Criar Nova Senha")
-                    otp_code = st.text_input("Código de 6 dígitos recebido no e-mail", key="otp_code")
-                    new_pwd = st.text_input("Crie sua Nova Senha (mínimo 6 caracteres)", type="password", key="rec_new_pwd")
-                    
+                    otp_code = st.text_input("Código de 6 dígitos", key="otp_code")
+                    new_pwd = st.text_input("Nova Senha", type="password", key="rec_new_pwd")
                     if st.button("Confirmar Nova Senha", type="primary", use_container_width=True):
                         if otp_code and len(new_pwd) >= 6:
                             try:
-                                supabase.auth.verify_otp({
-                                    "email": st.session_state['recovery_email'], 
-                                    "token": otp_code, 
-                                    "type": "recovery"
-                                })
+                                supabase.auth.verify_otp({"email": st.session_state['recovery_email'], "token": otp_code, "type": "recovery"})
                                 supabase.auth.update_user({"password": new_pwd})
                                 supabase.auth.sign_out()
                                 st.session_state['recovery_email'] = None
-                                st.success("✅ Senha redefinida com sucesso! Volte para a aba 'Entrar'.")
-                            except Exception as e:
-                                st.error(f"Código inválido/expirado ou erro interno.")
-                        else:
-                            st.warning("Preencha o código e certifique-se de que a nova senha tem no mínimo 6 caracteres.")
+                                st.success("Senha redefinida com sucesso!")
+                            except Exception:
+                                st.error("Código inválido/expirado.")
 else:
-    # TELA DO SISTEMA AUTENTICADO
-    
     # --- Sidebar ---
     with st.sidebar:
         st.markdown(f"👤 **Usuário:** {st.session_state['user_email']}")
@@ -514,15 +481,9 @@ else:
             if submitted and new_numero:
                 num_formatado = formatar_cnj(new_numero)
                 supabase.table("processos").insert({
-                    "numero": num_formatado, 
-                    "tribunal": "TJ-SP", 
-                    "parte": new_parte, 
-                    "situacao": "Em Andamento", 
-                    "prazo": "", 
-                    "observacoes": "", 
-                    "marcado": "", 
-                    "cor_card": "", 
-                    "notif_data": ""
+                    "numero": num_formatado, "tribunal": "TJ-SP", "parte": new_parte, 
+                    "situacao": "Em Andamento", "prazo": "", "observacoes": "", 
+                    "marcado": "", "cor_card": "", "notif_data": ""
                 }).execute()
                 st.success(f"Processo {num_formatado} cadastrado!")
                 st.rerun()
@@ -530,53 +491,57 @@ else:
         st.divider()
         
         if st.button("📧 Sincronizar Publicações (IMAP)", use_container_width=True):
-            with st.spinner("Varrendo caixa de entrada e aplicando automações..."):
+            with st.spinner("Varrendo caixa de entrada..."):
                 read_publications_from_email()
                 st.rerun()
 
         st.divider()
 
-        # Módulo de Chat RAG (Gemini) na Sidebar
+        # Módulo de Chat RAG
         st.markdown("### 🤖 Assistente Gemini")
         for msg in st.session_state.messages:
-            with st.chat_message(msg["role"]): 
-                st.markdown(msg["content"])
+            with st.chat_message(msg["role"]): st.markdown(msg["content"])
                 
         if prompt := st.chat_input("Pergunte sobre os processos..."):
-            if not genai or not CONFIG.get("gemini", {}).get("api_key"):
-                st.error("Configure a API Key do Gemini em Configurações.")
-            else:
-                st.session_state.messages.append({"role": "user", "content": prompt})
-                with st.chat_message("user"): 
-                    st.markdown(prompt)
-                
-                df_context = load_data()
-                contexto_txt = df_context.to_string(index=False) if not df_context.empty else "Nenhum processo."
-                
-                with st.chat_message("assistant"):
-                    with st.spinner("Consultando dados..."):
-                        try:
-                            # Tentativa de comunicação chat com Fallback Manual
-                            try:
-                                chat_sess = genai.GenerativeModel('gemini-1.5-flash').start_chat(history=[])
-                                prompt_completo = f"Você é o assistente jurídico GPAdv. Responda baseando-se NESTA tabela:\n{contexto_txt}\n\nPergunta: {prompt}"
-                                resposta = chat_sess.send_message(prompt_completo)
-                            except Exception as inner_e:
-                                if '404' in str(inner_e) or 'not found' in str(inner_e).lower():
-                                    chat_sess = genai.GenerativeModel('gemini-pro').start_chat(history=[])
-                                    resposta = chat_sess.send_message(prompt_completo)
-                                else:
-                                    raise inner_e
-                            
-                            st.markdown(resposta.text)
-                            st.session_state.messages.append({"role": "assistant", "content": resposta.text})
-                        except Exception as e:
-                            st.error(f"Erro na IA: {e}")
+            st.session_state.messages.append({"role": "user", "content": prompt})
+            with st.chat_message("user"): st.markdown(prompt)
+            
+            df_context = load_data()
+            contexto_txt = df_context.to_string(index=False) if not df_context.empty else "Nenhum processo."
+            
+            with st.chat_message("assistant"):
+                with st.spinner("Consultando dados..."):
+                    try:
+                        prompt_completo = f"Você é o assistente jurídico GPAdv. Responda baseando-se NESTA tabela:\n{contexto_txt}\n\nPergunta: {prompt}"
+                        resposta = gerar_conteudo_ia(prompt_completo)
+                        st.markdown(resposta.text)
+                        st.session_state.messages.append({"role": "assistant", "content": resposta.text})
+                    except Exception as e:
+                        st.error(f"Erro na IA: {e}")
 
-    # --- Área Principal (Tabs Superiores) ---
-    st.title(f"⚖️ GPAdv")
-    st.caption(f"Versão Corporativa {APP_VERSION}")
+    # --- Área Principal ---
+    col_t1, col_t2, col_t3 = st.columns([6, 1.5, 2.5], vertical_alignment="bottom")
+    
+    with col_t1:
+        st.title("⚖️ GPAdv")
+        st.caption("Versão Corporativa 36.4 (Auto-Update Parte, Smart Import & AI Robustness)")
+        
+    with col_t2:
+        if st.button("🔄 Atualizar", use_container_width=True):
+            st.rerun()
+            
+    with col_t3:
+        with st.popover("📜 Histórico de Versão", use_container_width=True):
+            st.markdown("""
+            **Resumo de Funcionalidades (v36.4)**
+            * **Motor IA (Auto-Discovery):** Fim dos erros 404. O sistema agora consulta o Google em tempo real para utilizar o modelo compatível mais avançado.
+            * **Extração PDF (Auto-Update):** Ao ler um PDF, a IA identifica o nome completo da parte e atualiza a tabela automaticamente.
+            * **Smart Import (Excel):** Importação inteligente que aceita colunas variadas e reconhece o CNJ dinamicamente.
+            * **Auto-Save E-mail (IMAP):** Cada usuário conecta seu próprio e-mail corporativo. O sistema varre a caixa, extrai a publicação e salva na linha do tempo do processo.
+            * **Segurança AuthOTP:** Recuperação de senha por PIN numérico diretamente integrada com a nuvem.
+            """)
 
+    st.write("") # Espaçamento
     tab_dash, tab_config, tab_ia = st.tabs(["📊 Dashboard Central", "⚙️ Configurações Pessoais", "🤖 Inteligência de Documentos (PDF)"])
 
     # ---------------- TAB 1: DASHBOARD CENTRAL ----------------
@@ -600,23 +565,16 @@ else:
             with col_export:
                 if not df.empty:
                     excel_bytes = export_to_excel(df)
-                    st.download_button(
-                        label="📥 Exportar Excel",
-                        data=excel_bytes,
-                        file_name=f"Relatorio_Processos_{datetime.datetime.now().strftime('%Y%m%d')}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True
-                    )
+                    st.download_button(label="📥 Exportar Excel", data=excel_bytes, file_name=f"Relatorio_GPAdv.xlsx", use_container_width=True)
                     
             with col_import:
                 with st.popover("📤 Importar Excel", use_container_width=True):
-                    st.write("A planilha deve conter pelo menos uma coluna 'numero' ou 'CNJ'.")
+                    st.write("A planilha deve conter uma coluna 'numero' ou 'CNJ'.")
                     uploaded_file = st.file_uploader("", type=["xlsx"])
                     if uploaded_file is not None:
-                        if st.button("Confirmar Importação Lote", type="primary"):
-                            with st.spinner("Processando dados de forma inteligente..."):
-                                sucesso = import_from_excel(uploaded_file)
-                                if sucesso:
+                        if st.button("Confirmar Importação", type="primary"):
+                            with st.spinner("Processando..."):
+                                if import_from_excel(uploaded_file):
                                     st.success("Importação concluída!")
                                     st.rerun()
 
@@ -632,9 +590,7 @@ else:
                 num_rows="dynamic",
                 hide_index=True,
                 column_config={
-                    "id": None,
-                    "cor_card": None,
-                    "notif_data": None,
+                    "id": None, "cor_card": None, "notif_data": None,
                     "numero": st.column_config.TextColumn("Número (CNJ)", required=True),
                     "situacao": st.column_config.SelectboxColumn("Status", options=["Em Andamento", "Arquivado", "Suspenso", "Concluído"]),
                 },
@@ -663,7 +619,6 @@ else:
 
         st.divider()
         
-        # Módulo da Linha do Tempo e Geração de Peça
         st.write("### 📜 Linha do Tempo & Engenharia Jurídica (IA)")
         col_hist, col_ai = st.columns([2, 1])
 
@@ -735,7 +690,7 @@ else:
         
         if uploaded_pdf is not None:
             if st.button("Processar Movimentação via IA", type="primary", use_container_width=True):
-                with st.spinner("Lendo documento e extraindo dados críticos..."):
+                with st.spinner("Consultando servidores do Google e extraindo dados..."):
                     resultado = processar_pdf_movimentacao(uploaded_pdf)
                     if resultado:
                         st.success("✅ Dados extraídos e salvos no histórico com sucesso!")
