@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # GPAdv_Web.py  —  "Meu Controle Jurídico" (Web / Supabase Enterprise)
-# Versão Unificada: 36.5 (Grid History, Auto-Refresh & AI Auto-Discovery)
+# Versão Unificada: 36.6 (Status Tabs Filter, Grid History, Auto-Refresh & AI Auto-Discovery)
 # ------------------------------------------------------------------------------------
 
 import os
@@ -198,7 +198,6 @@ def processar_pdf_movimentacao(uploaded_file):
             salvar_andamento(num_processo, f"Movimentação Extraída (PDF): {dados_json.get('resumo_movimentacao', '')}")
             
             if nome_extraido and len(nome_extraido.strip()) > 3:
-                # Atualiza nome da parte no Supabase
                 supabase.table("processos").update({"parte": nome_extraido.strip()}).eq("numero", num_processo).execute()
                 st.session_state['temp_toast'] = f"Nome atualizado para: {nome_extraido.strip()}"
         
@@ -248,7 +247,6 @@ def logout():
 
 # ---------------- Funções de Banco de Dados (Supabase) ----------------
 def load_data():
-    """Carrega dados e cruza com a última movimentação para exibir na grid"""
     try:
         response = supabase.table("processos").select("*").order("id", desc=True).execute()
         if not response.data:
@@ -256,18 +254,13 @@ def load_data():
             
         df_proc = pd.DataFrame(response.data)
         
-        # Busca histórico para mesclar a última movimentação
         hist_res = supabase.table("historico_pecas").select("numero_processo, data_hora, descricao").order("data_hora", desc=True).execute()
         
         if hist_res.data:
             df_hist = pd.DataFrame(hist_res.data)
-            # Mantém apenas a primeira ocorrência (a mais recente) de cada processo
-            df_hist_latest = df_hist.drop_duplicates(subset=['numero_processo'], keep='first')
-            
-            # Formata o texto para exibir na tabela
+            df_hist_latest = df_hist.drop_duplicates(subset=['numero_processo'], keep='first').copy()
             df_hist_latest['ultima_mov'] = df_hist_latest['data_hora'].str[:10] + " - " + df_hist_latest['descricao'].str[:100] + "..."
             
-            # Mescla com o dataframe principal
             df_proc = pd.merge(df_proc, df_hist_latest[['numero_processo', 'ultima_mov']], left_on='numero', right_on='numero_processo', how='left')
             df_proc['ultima_mov'] = df_proc['ultima_mov'].fillna('Sem histórico')
             df_proc = df_proc.drop(columns=['numero_processo'])
@@ -418,7 +411,6 @@ def generate_piece(proc_num):
 # RENDERIZAÇÃO DA INTERFACE PRINCIPAL
 # ==============================================================================
 
-# Exibe toast persistente se existir
 if st.session_state['temp_toast']:
     st.toast(st.session_state['temp_toast'], icon="✅")
     st.session_state['temp_toast'] = ""
@@ -539,7 +531,7 @@ else:
     
     with col_t1:
         st.title("⚖️ GPAdv")
-        st.caption("Versão Corporativa 36.5 (Grid History, Auto-Refresh & AI Auto-Discovery)")
+        st.caption("Versão Corporativa 36.6 (Status Tabs Filter, Grid History, Auto-Refresh)")
         
     with col_t2:
         if st.button("🔄 Atualizar", use_container_width=True):
@@ -548,12 +540,12 @@ else:
     with col_t3:
         with st.popover("📜 Histórico de Versão", use_container_width=True):
             st.markdown("""
-            **Resumo de Funcionalidades (v36.5)**
-            * **Histórico no Grid (NOVO):** A tabela principal agora exibe a última movimentação de cada processo em tempo real.
-            * **Auto-Refresh Inteligente (NOVO):** O sistema agora recarrega a tabela e o nome da parte automaticamente assim que a IA termina de ler o PDF.
-            * **Motor IA (Auto-Discovery):** Fim dos erros 404. O sistema consulta o Google em tempo real para usar o modelo compatível.
-            * **Smart Import (Excel):** Importação inteligente que aceita colunas variadas e reconhece o CNJ dinamicamente.
-            * **Auto-Save E-mail (IMAP):** Captura automática da caixa de entrada direto para a linha do tempo.
+            **Resumo de Funcionalidades (v36.6)**
+            * **Filtro de Abas/Status (NOVO):** Navegue rapidamente entre processos em Andamento, Arquivados, etc., direto pela interface.
+            * **Histórico no Grid:** A tabela principal exibe a última movimentação de cada processo em tempo real.
+            * **Auto-Refresh Inteligente:** O sistema recarrega a tabela e o nome da parte automaticamente após a IA ler o PDF.
+            * **Motor IA (Auto-Discovery):** Fim dos erros 404. O sistema consulta o Google em tempo real.
+            * **Smart Import (Excel):** Importação inteligente.
             """)
 
     st.write("")
@@ -595,13 +587,27 @@ else:
                                     st.rerun()
 
         st.write("### Base de Dados")
+        
+        # --- NOVO: FILTRO POR ABAS/STATUS ---
+        filtro_status = st.radio(
+            "Filtrar por Status:",
+            options=["Todos", "Em Andamento", "Arquivado", "Suspenso", "Concluído"],
+            horizontal=True,
+            label_visibility="collapsed"
+        )
+
+        if filtro_status != "Todos" and not df.empty:
+            df_display = df[df['situacao'].str.contains(filtro_status, case=False, na=False)]
+        else:
+            df_display = df
+            
         st.caption("Edição Inline: Dê um duplo clique para editar. Nova coluna 'Último Histórico' exibe a movimentação mais recente.")
 
-        if df.empty:
-            st.info("O banco de dados está vazio. Utilize o formulário lateral para adicionar registros ou importe uma planilha Excel.")
+        if df_display.empty:
+            st.info(f"Nenhum processo listado sob o filtro '{filtro_status}'.")
         else:
             edited_df = st.data_editor(
-                df,
+                df_display,
                 use_container_width=True,
                 num_rows="dynamic",
                 hide_index=True,
@@ -620,13 +626,14 @@ else:
                 
                 if changes.get("edited_rows"):
                     for row_idx, col_changes in changes["edited_rows"].items():
-                        proc_id = df.iloc[row_idx]["id"]
+                        # Obtém o ID mapeando corretamente pelo dataframe filtrado (evita sobrescrever dados errados)
+                        proc_id = df_display.iloc[row_idx]["id"]
                         supabase.table("processos").update(col_changes).eq("id", int(proc_id)).execute()
                     needs_rerun = True
                     
                 if changes.get("deleted_rows"):
                     for row_idx in changes["deleted_rows"]:
-                        proc_id = df.iloc[row_idx]["id"]
+                        proc_id = df_display.iloc[row_idx]["id"]
                         supabase.table("processos").delete().eq("id", int(proc_id)).execute()
                     needs_rerun = True
 
@@ -641,7 +648,7 @@ else:
 
         with col_hist:
             proc_list = df["numero"].tolist() if not df.empty else []
-            proc_escolhido = st.selectbox("Selecione um processo para visualizar o histórico de andamentos completo:", proc_list)
+            proc_escolhido = st.selectbox("Selecione um processo para visualizar o histórico completo:", proc_list)
             
             if proc_escolhido:
                 hist_dados = get_historico(proc_escolhido)
@@ -706,7 +713,6 @@ else:
         uploaded_pdf = st.file_uploader("Selecione o arquivo PDF", type=["pdf"])
         
         if uploaded_pdf is not None:
-            # Se já temos um resultado processado na sessão para este upload, exibimos
             if st.session_state['pdf_json_result']:
                 st.success("✅ Dados extraídos e salvos no histórico com sucesso!")
                 st.json(st.session_state['pdf_json_result'])
@@ -720,4 +726,4 @@ else:
                         resultado = processar_pdf_movimentacao(uploaded_pdf)
                         if resultado:
                             st.session_state['pdf_json_result'] = resultado
-                            st.rerun() # Força o refresh da tela inteira (incluindo a tabela) imediatamente
+                            st.rerun()
