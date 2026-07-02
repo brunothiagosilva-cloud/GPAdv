@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # GPAdv_Web.py  —  "Meu Controle Jurídico" (Web / Supabase Enterprise)
-# Versão Unificada: 36.8 (Métricas Dinâmicas, Filtros Inteligentes & Exportação Contextual)
+# Versão Unificada: 36.9 (Supabase Config Fix, IMAP Trim, Metrics & Auto-Discovery)
 # ------------------------------------------------------------------------------------
 
 import os
@@ -531,7 +531,7 @@ else:
     
     with col_t1:
         st.title("⚖️ GPAdv")
-        st.caption("Versão Corporativa 36.8 (Métricas Dinâmicas, Filtros Inteligentes & Exportação Contextual)")
+        st.caption("Versão Corporativa 36.9 (Supabase Config Fix, IMAP Trim, Metrics & Auto-Discovery)")
         
     with col_t2:
         if st.button("🔄 Atualizar", use_container_width=True):
@@ -540,13 +540,12 @@ else:
     with col_t3:
         with st.popover("📜 Histórico de Versão", use_container_width=True):
             st.markdown("""
-            **Resumo de Funcionalidades (v36.8)**
-            * **Métricas Dinâmicas (NOVO):** Os painéis numéricos agora reagem em tempo real aos filtros aplicados na tela.
-            * **Exportação Contextual (NOVO):** O botão Excel agora exporta apenas os dados que estiverem filtrados no Dashboard.
-            * **Edição de Grid (Correção Técnica):** Salvamento simultâneo e seguro de status e textos diretamente na tabela.
-            * **Filtro de Abas/Status:** Navegue rapidamente por status.
+            **Resumo de Funcionalidades (v36.9)**
+            * **Integração IMAP Resiliente (NOVO):** Sistema grava as credenciais de e-mail bypassando exigências estritas de Primary Key no Supabase e remove espaços indesejados da senha automaticamente.
+            * **Métricas Dinâmicas:** Os painéis numéricos reagem em tempo real aos filtros aplicados na tela.
+            * **Exportação Contextual:** O botão Excel exporta apenas os dados que estiverem filtrados no Dashboard.
+            * **Edição de Grid Segura:** Salvamento simultâneo e seguro de status e textos diretamente na tabela.
             * **Auto-Refresh Inteligente:** Recarregamento automatizado de tela após ações de IA ou extrações IMAP.
-            * **Motor IA (Auto-Discovery):** Fim dos erros 404, seleção fluída de modelos de Inteligência Artificial.
             """)
 
     st.write("")
@@ -556,7 +555,6 @@ else:
     with tab_dash:
         df = load_data()
         
-        # 1. Aloca os espaços na tela (Placeholders)
         metrics_placeholder = st.empty()
         
         with st.container(border=True):
@@ -564,7 +562,6 @@ else:
             with col_search:
                 busca = st.text_input("🔍 Buscar em qualquer campo:", placeholder="Digite número, parte, tribunal...")
             
-            # Espaço para o botão de exportação que será renderizado depois dos filtros
             export_placeholder = col_export.empty()
             
             with col_import:
@@ -588,7 +585,6 @@ else:
             label_visibility="collapsed"
         )
 
-        # 2. Aplica a Lógica de Negócio dos Filtros
         df_display = df.copy()
         
         if busca and not df_display.empty:
@@ -597,7 +593,6 @@ else:
         if filtro_status != "Todos" and not df_display.empty:
             df_display = df_display[df_display['situacao'].str.contains(filtro_status, case=False, na=False)]
 
-        # 3. Desenha as Métricas (agora alimentadas pelo df_display filtrado)
         with metrics_placeholder.container():
             if not df_display.empty:
                 met1, met2, met3 = st.columns(3)
@@ -611,7 +606,6 @@ else:
                 met2.metric("Com Publicação Recente", 0)
                 met3.metric("Em Andamento", 0)
 
-        # 4. Desenha o botão de Exportação contextual
         with export_placeholder:
             if not df_display.empty:
                 excel_bytes = export_to_excel(df_display)
@@ -619,7 +613,6 @@ else:
             else:
                 st.download_button(label="📥 Exportar Excel", data=b"", file_name="vazio.xlsx", disabled=True, use_container_width=True)
 
-        # 5. Desenha o Grid
         st.caption("Edição Inline: Dê um duplo clique para editar. Nova coluna 'Último Histórico' exibe a movimentação mais recente.")
 
         if df_display.empty:
@@ -700,12 +693,26 @@ else:
                 
                 if st.button("Salvar E-mail IMAP", type="primary"):
                     if email_imap and pwd_imap:
-                        supabase.table("configuracoes").upsert({
-                            "usuario_email": st.session_state['user_email'],
-                            "imap_email": email_imap,
-                            "imap_pwd": pwd_imap
-                        }).execute()
-                        st.success("Configurações IMAP vinculadas ao seu perfil!")
+                        pwd_limpa = pwd_imap.replace(" ", "")
+                        
+                        # Verifica se o usuário já tem registro para evitar o erro de upsert do Supabase
+                        busca = supabase.table("configuracoes").select("*").eq("usuario_email", st.session_state['user_email']).execute()
+                        
+                        try:
+                            if busca.data:
+                                supabase.table("configuracoes").update({
+                                    "imap_email": email_imap,
+                                    "imap_pwd": pwd_limpa
+                                }).eq("usuario_email", st.session_state['user_email']).execute()
+                            else:
+                                supabase.table("configuracoes").insert({
+                                    "usuario_email": st.session_state['user_email'],
+                                    "imap_email": email_imap,
+                                    "imap_pwd": pwd_limpa
+                                }).execute()
+                            st.success("Configurações IMAP vinculadas ao seu perfil!")
+                        except Exception as e:
+                            st.error(f"Erro ao salvar no banco: {e}")
                     else:
                         st.warning("Preencha o e-mail e a senha para salvar.")
 
