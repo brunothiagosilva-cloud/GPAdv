@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # GPAdv_Web.py  —  "Meu Controle Jurídico" (Web / Supabase Enterprise)
-# Versão Unificada: 36.7 (Correção de Tipagem no Grid Update, Status Tabs & Auto-Discovery)
+# Versão Unificada: 36.8 (Métricas Dinâmicas, Filtros Inteligentes & Exportação Contextual)
 # ------------------------------------------------------------------------------------
 
 import os
@@ -531,7 +531,7 @@ else:
     
     with col_t1:
         st.title("⚖️ GPAdv")
-        st.caption("Versão Corporativa 36.7 (Correção de Tipagem no Grid Update, Status Tabs & Auto-Discovery)")
+        st.caption("Versão Corporativa 36.8 (Métricas Dinâmicas, Filtros Inteligentes & Exportação Contextual)")
         
     with col_t2:
         if st.button("🔄 Atualizar", use_container_width=True):
@@ -540,13 +540,13 @@ else:
     with col_t3:
         with st.popover("📜 Histórico de Versão", use_container_width=True):
             st.markdown("""
-            **Resumo de Funcionalidades (v36.7)**
-            * **Filtro de Abas/Status:** Navegue rapidamente entre processos em Andamento, Arquivados, etc., direto pela interface.
-            * **Edição de Grid (Correção Técnica):** Correção do bug que impedia o salvamento da alteração de status/parte no banco de dados quando realizado diretamente na tabela.
-            * **Histórico no Grid:** A tabela principal exibe a última movimentação de cada processo em tempo real.
-            * **Auto-Refresh Inteligente:** O sistema recarrega a tabela e o nome da parte automaticamente após a IA ler o PDF.
-            * **Motor IA (Auto-Discovery):** Fim dos erros 404. O sistema consulta o Google em tempo real.
-            * **Smart Import (Excel):** Importação inteligente.
+            **Resumo de Funcionalidades (v36.8)**
+            * **Métricas Dinâmicas (NOVO):** Os painéis numéricos agora reagem em tempo real aos filtros aplicados na tela.
+            * **Exportação Contextual (NOVO):** O botão Excel agora exporta apenas os dados que estiverem filtrados no Dashboard.
+            * **Edição de Grid (Correção Técnica):** Salvamento simultâneo e seguro de status e textos diretamente na tabela.
+            * **Filtro de Abas/Status:** Navegue rapidamente por status.
+            * **Auto-Refresh Inteligente:** Recarregamento automatizado de tela após ações de IA ou extrações IMAP.
+            * **Motor IA (Auto-Discovery):** Fim dos erros 404, seleção fluída de modelos de Inteligência Artificial.
             """)
 
     st.write("")
@@ -555,26 +555,18 @@ else:
     # ---------------- TAB 1: DASHBOARD CENTRAL ----------------
     with tab_dash:
         df = load_data()
-
-        if not df.empty:
-            met1, met2, met3 = st.columns(3)
-            met1.metric("Total de Processos", len(df))
-            met2.metric("Com Publicação Recente", len(df[df['marcado'] == '📩']))
-            met3.metric("Em Andamento", len(df[df['situacao'].str.contains('Andamento', case=False, na=False)]))
-
+        
+        # 1. Aloca os espaços na tela (Placeholders)
+        metrics_placeholder = st.empty()
+        
         with st.container(border=True):
             col_search, col_export, col_import = st.columns([2, 1, 1], vertical_alignment="bottom")
-            
             with col_search:
                 busca = st.text_input("🔍 Buscar em qualquer campo:", placeholder="Digite número, parte, tribunal...")
-                if busca and not df.empty:
-                    df = df[df.apply(lambda row: row.astype(str).str.contains(busca, case=False).any(), axis=1)]
-                    
-            with col_export:
-                if not df.empty:
-                    excel_bytes = export_to_excel(df)
-                    st.download_button(label="📥 Exportar Excel", data=excel_bytes, file_name=f"Relatorio_GPAdv.xlsx", use_container_width=True)
-                    
+            
+            # Espaço para o botão de exportação que será renderizado depois dos filtros
+            export_placeholder = col_export.empty()
+            
             with col_import:
                 with st.popover("📤 Importar Excel", use_container_width=True):
                     st.write("A planilha deve conter uma coluna 'numero' ou 'CNJ'.")
@@ -596,15 +588,42 @@ else:
             label_visibility="collapsed"
         )
 
-        if filtro_status != "Todos" and not df.empty:
-            df_display = df[df['situacao'].str.contains(filtro_status, case=False, na=False)]
-        else:
-            df_display = df
+        # 2. Aplica a Lógica de Negócio dos Filtros
+        df_display = df.copy()
+        
+        if busca and not df_display.empty:
+            df_display = df_display[df_display.apply(lambda row: row.astype(str).str.contains(busca, case=False).any(), axis=1)]
             
+        if filtro_status != "Todos" and not df_display.empty:
+            df_display = df_display[df_display['situacao'].str.contains(filtro_status, case=False, na=False)]
+
+        # 3. Desenha as Métricas (agora alimentadas pelo df_display filtrado)
+        with metrics_placeholder.container():
+            if not df_display.empty:
+                met1, met2, met3 = st.columns(3)
+                titulo_total = "Total de Processos" if filtro_status == "Todos" else f"Total ({filtro_status})"
+                met1.metric(titulo_total, len(df_display))
+                met2.metric("Com Publicação Recente", len(df_display[df_display['marcado'] == '📩']))
+                met3.metric("Em Andamento", len(df_display[df_display['situacao'].str.contains('Andamento', case=False, na=False)]))
+            else:
+                met1, met2, met3 = st.columns(3)
+                met1.metric("Total de Processos", 0)
+                met2.metric("Com Publicação Recente", 0)
+                met3.metric("Em Andamento", 0)
+
+        # 4. Desenha o botão de Exportação contextual
+        with export_placeholder:
+            if not df_display.empty:
+                excel_bytes = export_to_excel(df_display)
+                st.download_button(label="📥 Exportar Excel", data=excel_bytes, file_name=f"Relatorio_GPAdv.xlsx", use_container_width=True)
+            else:
+                st.download_button(label="📥 Exportar Excel", data=b"", file_name="vazio.xlsx", disabled=True, use_container_width=True)
+
+        # 5. Desenha o Grid
         st.caption("Edição Inline: Dê um duplo clique para editar. Nova coluna 'Último Histórico' exibe a movimentação mais recente.")
 
         if df_display.empty:
-            st.info(f"Nenhum processo listado sob o filtro '{filtro_status}'.")
+            st.info(f"Nenhum processo listado sob o filtro atual.")
         else:
             edited_df = st.data_editor(
                 df_display,
@@ -626,21 +645,18 @@ else:
                 
                 if changes.get("edited_rows"):
                     for row_idx_str, col_changes in changes["edited_rows"].items():
-                        # Converte a posição da linha para inteiro antes de acessar o id correspondente
                         proc_id = df_display.iloc[int(row_idx_str)]["id"]
                         supabase.table("processos").update(col_changes).eq("id", int(proc_id)).execute()
                     needs_rerun = True
                     
                 if changes.get("deleted_rows"):
                     for row_idx in changes["deleted_rows"]:
-                        # Converte a posição da linha para inteiro antes de acessar o id correspondente
                         proc_id = df_display.iloc[int(row_idx)]["id"]
                         supabase.table("processos").delete().eq("id", int(proc_id)).execute()
                     needs_rerun = True
 
                 if needs_rerun:
                     st.toast("✅ Banco de dados atualizado com sucesso!")
-                    # Limpa a sessão de edição para não travar os dados velhos na memória
                     del st.session_state["process_editor"]
                     st.rerun()
 
