@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # GPAdv_Web.py  —  "Meu Controle Jurídico" (Web / Supabase Enterprise)
-# Versão Unificada: 36.6 (Status Tabs Filter, Grid History, Auto-Refresh & AI Auto-Discovery)
+# Versão Unificada: 36.7 (Correção de Tipagem no Grid Update, Status Tabs & Auto-Discovery)
 # ------------------------------------------------------------------------------------
 
 import os
@@ -531,7 +531,7 @@ else:
     
     with col_t1:
         st.title("⚖️ GPAdv")
-        st.caption("Versão Corporativa 36.6 (Status Tabs Filter, Grid History, Auto-Refresh)")
+        st.caption("Versão Corporativa 36.7 (Correção de Tipagem no Grid Update, Status Tabs & Auto-Discovery)")
         
     with col_t2:
         if st.button("🔄 Atualizar", use_container_width=True):
@@ -540,8 +540,9 @@ else:
     with col_t3:
         with st.popover("📜 Histórico de Versão", use_container_width=True):
             st.markdown("""
-            **Resumo de Funcionalidades (v36.6)**
-            * **Filtro de Abas/Status (NOVO):** Navegue rapidamente entre processos em Andamento, Arquivados, etc., direto pela interface.
+            **Resumo de Funcionalidades (v36.7)**
+            * **Filtro de Abas/Status:** Navegue rapidamente entre processos em Andamento, Arquivados, etc., direto pela interface.
+            * **Edição de Grid (Correção Técnica):** Correção do bug que impedia o salvamento da alteração de status/parte no banco de dados quando realizado diretamente na tabela.
             * **Histórico no Grid:** A tabela principal exibe a última movimentação de cada processo em tempo real.
             * **Auto-Refresh Inteligente:** O sistema recarrega a tabela e o nome da parte automaticamente após a IA ler o PDF.
             * **Motor IA (Auto-Discovery):** Fim dos erros 404. O sistema consulta o Google em tempo real.
@@ -588,7 +589,6 @@ else:
 
         st.write("### Base de Dados")
         
-        # --- NOVO: FILTRO POR ABAS/STATUS ---
         filtro_status = st.radio(
             "Filtrar por Status:",
             options=["Todos", "Em Andamento", "Arquivado", "Suspenso", "Concluído"],
@@ -625,20 +625,23 @@ else:
                 needs_rerun = False
                 
                 if changes.get("edited_rows"):
-                    for row_idx, col_changes in changes["edited_rows"].items():
-                        # Obtém o ID mapeando corretamente pelo dataframe filtrado (evita sobrescrever dados errados)
-                        proc_id = df_display.iloc[row_idx]["id"]
+                    for row_idx_str, col_changes in changes["edited_rows"].items():
+                        # Converte a posição da linha para inteiro antes de acessar o id correspondente
+                        proc_id = df_display.iloc[int(row_idx_str)]["id"]
                         supabase.table("processos").update(col_changes).eq("id", int(proc_id)).execute()
                     needs_rerun = True
                     
                 if changes.get("deleted_rows"):
                     for row_idx in changes["deleted_rows"]:
-                        proc_id = df_display.iloc[row_idx]["id"]
+                        # Converte a posição da linha para inteiro antes de acessar o id correspondente
+                        proc_id = df_display.iloc[int(row_idx)]["id"]
                         supabase.table("processos").delete().eq("id", int(proc_id)).execute()
                     needs_rerun = True
 
                 if needs_rerun:
                     st.toast("✅ Banco de dados atualizado com sucesso!")
+                    # Limpa a sessão de edição para não travar os dados velhos na memória
+                    del st.session_state["process_editor"]
                     st.rerun()
 
         st.divider()
