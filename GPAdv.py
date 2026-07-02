@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # GPAdv_Web.py  —  "Meu Controle Jurídico" (Web / Supabase Enterprise)
-# Versão Unificada: Sistema Original + Motores Gemini AI + IMAP Auto-Save + Prevenção KeyError
+# Versão Unificada: Sistema Original + Motores Gemini AI + IMAP Auto-Save + UI Fix + Smart Import
 # ------------------------------------------------------------------------------------
 
 import os
@@ -47,7 +47,7 @@ def init_connection() -> Client:
 supabase = init_connection()
 
 # ---------------- Config & Paths Locais (E-mail/Cripto) ----------------
-APP_VERSION = "36.1 (Enterprise Auth, Gemini AI, IMAP Auto-Save & OTP)"
+APP_VERSION = "36.3 (Smart Import, UI Alignment, Enterprise AI & Model Fix)"
 INSTALL_DIR = Path("C:/GerenciadorProcessos")
 DATA_DIR = INSTALL_DIR / "data"
 
@@ -97,7 +97,6 @@ def load_config():
     try:
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
             cfg = json.load(f)
-            # Verificação e inserção automática de chaves ausentes
             if "gemini" not in cfg:
                 cfg["gemini"] = {"enabled": False, "api_key": ""}
             if "email" not in cfg:
@@ -108,12 +107,12 @@ def load_config():
 
 CONFIG = load_config()
 
-# Inicializa o Gemini
+# Inicializa o Gemini com o sufixo -latest para evitar erro 404 na API v1beta
 model = None
 if genai and CONFIG.get("gemini", {}).get("api_key"):
     try:
         genai.configure(api_key=CONFIG["gemini"]["api_key"])
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel('gemini-1.5-flash-latest')
     except Exception as e:
         st.sidebar.error(f"Erro ao inicializar Gemini: {e}")
 
@@ -271,33 +270,45 @@ def import_from_excel(uploaded_file):
     try:
         df_import = pd.read_excel(uploaded_file, engine='openpyxl')
         
-        colunas_esperadas = ["numero", "tribunal", "parte", "situacao", "prazo"]
-        for col in colunas_esperadas:
-            if col not in df_import.columns:
-                st.error(f"A coluna '{col}' está ausente na planilha. O formato está incorreto.")
-                return False
-                
+        # Normaliza os nomes das colunas (minúsculo e sem espaços sobrando) para facilitar o match
+        df_import.columns = [str(c).lower().strip() for c in df_import.columns]
+        
+        # Verifica flexivelmente se existe uma coluna chave de CNJ/Número
+        if "numero" not in df_import.columns and "número" not in df_import.columns and "cnj" not in df_import.columns:
+            st.error("A planilha precisa ter pelo menos uma coluna chamada 'numero' ou 'cnj' para identificar os processos.")
+            return False
+            
         df_import = df_import.fillna("")
         registros = df_import.to_dict(orient="records")
         
         registros_limpos = []
         for reg in registros:
-            num_formatado = formatar_cnj(str(reg.get("numero", "")))
+            # Captura dinâmica da coluna de número
+            num_raw = reg.get("numero", reg.get("número", reg.get("cnj", "")))
+            if not num_raw: 
+                continue # Pula linhas vazias
+                
+            num_formatado = formatar_cnj(str(num_raw))
+            
+            # Captura dinâmica e segura das outras colunas com fallbacks
             registros_limpos.append({
                 "numero": num_formatado,
                 "tribunal": str(reg.get("tribunal", "TJ-SP")),
-                "parte": str(reg.get("parte", "")),
-                "situacao": str(reg.get("situacao", "Em Andamento")),
+                "parte": str(reg.get("parte", str(reg.get("cliente", "")))),
+                "situacao": str(reg.get("situacao", str(reg.get("status", "Em Andamento")))),
                 "prazo": str(reg.get("prazo", "")),
-                "observacoes": str(reg.get("observacoes", "")),
-                "marcado": str(reg.get("marcado", "")),
-                "cor_card": str(reg.get("cor_card", "")),
-                "notif_data": str(reg.get("notif_data", ""))
+                "observacoes": str(reg.get("observacoes", str(reg.get("obs", "")))),
+                "marcado": "",
+                "cor_card": "",
+                "notif_data": ""
             })
             
         if registros_limpos:
             supabase.table("processos").insert(registros_limpos).execute()
             return True
+        else:
+            st.warning("Não foram encontrados números válidos para importação.")
+            return False
             
     except Exception as e:
         st.error(f"Erro ao processar o arquivo Excel: {e}")
@@ -557,7 +568,8 @@ else:
             met3.metric("Em Andamento", len(df[df['situacao'].str.contains('Andamento', case=False, na=False)]))
 
         with st.container(border=True):
-            col_search, col_export, col_import = st.columns([2, 1, 1])
+            # Alinhamento vertical na base (bottom) resolve a assimetria visual dos botões
+            col_search, col_export, col_import = st.columns([2, 1, 1], vertical_alignment="bottom")
             
             with col_search:
                 busca = st.text_input("🔍 Buscar em qualquer campo:", placeholder="Digite número, parte, tribunal...")
@@ -565,7 +577,6 @@ else:
                     df = df[df.apply(lambda row: row.astype(str).str.contains(busca, case=False).any(), axis=1)]
                     
             with col_export:
-                st.write("<br>", unsafe_allow_html=True)
                 if not df.empty:
                     excel_bytes = export_to_excel(df)
                     st.download_button(
@@ -578,11 +589,11 @@ else:
                     
             with col_import:
                 with st.popover("📤 Importar Excel", use_container_width=True):
-                    st.write("Selecione um arquivo .xlsx contendo as colunas padrão.")
+                    st.write("A planilha deve conter pelo menos uma coluna 'numero' ou 'CNJ'.")
                     uploaded_file = st.file_uploader("", type=["xlsx"])
                     if uploaded_file is not None:
                         if st.button("Confirmar Importação Lote", type="primary"):
-                            with st.spinner("Formatando CNJs e inserindo registros..."):
+                            with st.spinner("Processando dados de forma inteligente..."):
                                 sucesso = import_from_excel(uploaded_file)
                                 if sucesso:
                                     st.success("Importação concluída!")
