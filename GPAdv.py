@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # GPAdv_Web.py  —  "Meu Controle Jurídico" (Web / Supabase Enterprise)
-# Versão Unificada: 36.9 (Supabase Config Fix, IMAP Trim, Metrics & Auto-Discovery)
+# Versão Unificada: 36.10 (Database Crash Prevention, Auto-Discovery & Smart Filter)
 # ------------------------------------------------------------------------------------
 
 import os
@@ -338,7 +338,7 @@ def read_publications_from_email():
             st.warning("Configure suas credenciais de e-mail na aba '⚙️ Configurações Pessoais' antes de sincronizar publicações.")
             return
     except Exception as e:
-        st.error(f"Erro ao buscar configurações de e-mail: {e}")
+        st.error("⚠️ Falha ao acessar configurações de e-mail no Banco de Dados. A tabela 'configuracoes' não foi criada.")
         return
 
     try:
@@ -388,7 +388,7 @@ def read_publications_from_email():
             st.info("Nenhum número de processo correspondente encontrado nos e-mails.")
             
     except Exception as e:
-        st.error(f"Falha de comunicação IMAP: {e}")
+        st.error(f"Falha de comunicação IMAP com o servidor de e-mail: {e}")
 
 def generate_piece(proc_num):
     try:
@@ -531,7 +531,7 @@ else:
     
     with col_t1:
         st.title("⚖️ GPAdv")
-        st.caption("Versão Corporativa 36.9 (Supabase Config Fix, IMAP Trim, Metrics & Auto-Discovery)")
+        st.caption("Versão Corporativa 36.10 (Database Crash Prevention, Auto-Discovery & Smart Filter)")
         
     with col_t2:
         if st.button("🔄 Atualizar", use_container_width=True):
@@ -540,12 +540,14 @@ else:
     with col_t3:
         with st.popover("📜 Histórico de Versão", use_container_width=True):
             st.markdown("""
-            **Resumo de Funcionalidades (v36.9)**
-            * **Integração IMAP Resiliente (NOVO):** Sistema grava as credenciais de e-mail bypassando exigências estritas de Primary Key no Supabase e remove espaços indesejados da senha automaticamente.
+            **Resumo de Funcionalidades (v36.10)**
+            * **Blindagem de Banco de Dados (NOVO):** Sistema previne telas de quebra totais caso as tabelas no Supabase não estejam criadas corretamente.
+            * **Integração IMAP Resiliente:** Sistema grava as credenciais de e-mail bypassando exigências estritas e remove espaços indesejados da senha automaticamente.
             * **Métricas Dinâmicas:** Os painéis numéricos reagem em tempo real aos filtros aplicados na tela.
             * **Exportação Contextual:** O botão Excel exporta apenas os dados que estiverem filtrados no Dashboard.
             * **Edição de Grid Segura:** Salvamento simultâneo e seguro de status e textos diretamente na tabela.
-            * **Auto-Refresh Inteligente:** Recarregamento automatizado de tela após ações de IA ou extrações IMAP.
+            * **Auto-Refresh Inteligente:** Recarregamento automatizado de tela após ações de IA.
+            * **Motor IA (Auto-Discovery):** Seleção fluída de modelos de Inteligência Artificial.
             """)
 
     st.write("")
@@ -695,10 +697,10 @@ else:
                     if email_imap and pwd_imap:
                         pwd_limpa = pwd_imap.replace(" ", "")
                         
-                        # Verifica se o usuário já tem registro para evitar o erro de upsert do Supabase
-                        busca = supabase.table("configuracoes").select("*").eq("usuario_email", st.session_state['user_email']).execute()
-                        
                         try:
+                            # Tenta consultar o banco envolto em um try para evitar crash global
+                            busca = supabase.table("configuracoes").select("*").eq("usuario_email", st.session_state['user_email']).execute()
+                            
                             if busca.data:
                                 supabase.table("configuracoes").update({
                                     "imap_email": email_imap,
@@ -710,9 +712,13 @@ else:
                                     "imap_email": email_imap,
                                     "imap_pwd": pwd_limpa
                                 }).execute()
-                            st.success("Configurações IMAP vinculadas ao seu perfil!")
+                                
+                            st.success("✅ Configurações IMAP vinculadas ao seu perfil com sucesso!")
                         except Exception as e:
-                            st.error(f"Erro ao salvar no banco: {e}")
+                            st.error("🚨 ERRO ESTRUTURAL NO BANCO DE DADOS: A tabela 'configuracoes' não existe no Supabase.")
+                            st.info("Para consertar definitivamente, acesse o painel do Supabase, clique em 'SQL Editor' e execute o script de criação da tabela.")
+                            with st.expander("Ver detalhes técnicos do erro"):
+                                st.write(e)
                     else:
                         st.warning("Preencha o e-mail e a senha para salvar.")
 
