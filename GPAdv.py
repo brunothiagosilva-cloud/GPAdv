@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # GPAdv_Web.py  —  "Meu Controle Jurídico" (Web / Supabase Enterprise)
-# Versão Unificada: 36.10 (Database Crash Prevention, Auto-Discovery & Smart Filter)
+# Versão Unificada: 36.11 (RLS Error Handling, Database Fixes & Auto-Discovery)
 # ------------------------------------------------------------------------------------
 
 import os
@@ -338,7 +338,7 @@ def read_publications_from_email():
             st.warning("Configure suas credenciais de e-mail na aba '⚙️ Configurações Pessoais' antes de sincronizar publicações.")
             return
     except Exception as e:
-        st.error("⚠️ Falha ao acessar configurações de e-mail no Banco de Dados. A tabela 'configuracoes' não foi criada.")
+        st.error(f"Erro ao buscar configurações de e-mail: {e}")
         return
 
     try:
@@ -531,7 +531,7 @@ else:
     
     with col_t1:
         st.title("⚖️ GPAdv")
-        st.caption("Versão Corporativa 36.10 (Database Crash Prevention, Auto-Discovery & Smart Filter)")
+        st.caption("Versão Corporativa 36.11 (RLS Error Handling, Database Fixes & Auto-Discovery)")
         
     with col_t2:
         if st.button("🔄 Atualizar", use_container_width=True):
@@ -540,14 +540,12 @@ else:
     with col_t3:
         with st.popover("📜 Histórico de Versão", use_container_width=True):
             st.markdown("""
-            **Resumo de Funcionalidades (v36.10)**
-            * **Blindagem de Banco de Dados (NOVO):** Sistema previne telas de quebra totais caso as tabelas no Supabase não estejam criadas corretamente.
-            * **Integração IMAP Resiliente:** Sistema grava as credenciais de e-mail bypassando exigências estritas e remove espaços indesejados da senha automaticamente.
-            * **Métricas Dinâmicas:** Os painéis numéricos reagem em tempo real aos filtros aplicados na tela.
-            * **Exportação Contextual:** O botão Excel exporta apenas os dados que estiverem filtrados no Dashboard.
-            * **Edição de Grid Segura:** Salvamento simultâneo e seguro de status e textos diretamente na tabela.
-            * **Auto-Refresh Inteligente:** Recarregamento automatizado de tela após ações de IA.
-            * **Motor IA (Auto-Discovery):** Seleção fluída de modelos de Inteligência Artificial.
+            **Resumo de Funcionalidades (v36.11)**
+            * **Tratamento de RLS (NOVO):** Sistema prevê bloqueios de segurança de linha (Row Level Security) do Supabase e instrui a solução.
+            * **Integração IMAP Resiliente:** Sistema grava as credenciais bypassando exigências estritas e remove espaços da senha automaticamente.
+            * **Métricas Dinâmicas:** Os painéis reagem em tempo real aos filtros aplicados na tela.
+            * **Exportação Contextual:** Botão Excel exporta apenas os dados filtrados.
+            * **Auto-Refresh Inteligente:** Recarregamento automatizado de tela após ações.
             """)
 
     st.write("")
@@ -698,7 +696,6 @@ else:
                         pwd_limpa = pwd_imap.replace(" ", "")
                         
                         try:
-                            # Tenta consultar o banco envolto em um try para evitar crash global
                             busca = supabase.table("configuracoes").select("*").eq("usuario_email", st.session_state['user_email']).execute()
                             
                             if busca.data:
@@ -715,10 +712,12 @@ else:
                                 
                             st.success("✅ Configurações IMAP vinculadas ao seu perfil com sucesso!")
                         except Exception as e:
-                            st.error("🚨 ERRO ESTRUTURAL NO BANCO DE DADOS: A tabela 'configuracoes' não existe no Supabase.")
-                            st.info("Para consertar definitivamente, acesse o painel do Supabase, clique em 'SQL Editor' e execute o script de criação da tabela.")
-                            with st.expander("Ver detalhes técnicos do erro"):
-                                st.write(e)
+                            erro_str = str(e)
+                            if 'row-level security' in erro_str or '42501' in erro_str:
+                                st.error("🚨 BLOQUEIO DE SEGURANÇA (RLS) NO SUPABASE.")
+                                st.info("A tabela foi criada, mas o Supabase bloqueou a gravação por segurança. Vá no painel do Supabase -> SQL Editor e rode o comando: ALTER TABLE public.configuracoes DISABLE ROW LEVEL SECURITY;")
+                            else:
+                                st.error(f"🚨 ERRO NO BANCO DE DADOS: {e}")
                     else:
                         st.warning("Preencha o e-mail e a senha para salvar.")
 
