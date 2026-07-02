@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # GPAdv_Web.py  —  "Meu Controle Jurídico" (Web / Supabase Enterprise)
-# Versão Unificada: Sistema Original + Motores Gemini AI + IMAP Auto-Save + UI Fix + Smart Import
+# Versão Unificada: 36.4 (Smart Import, UI Alignment, Model Fallback Fix & Auto-Update Parte)
 # ------------------------------------------------------------------------------------
 
 import os
@@ -39,7 +39,6 @@ st.set_page_config(
 # ---------------- Inicialização do Supabase ----------------
 @st.cache_resource
 def init_connection() -> Client:
-    # Substitua pelas suas chaves reais do projeto
     url = "https://cepzkxjdvtidonybkcte.supabase.co"
     key = "sb_publishable_287QhMSn5JrlsI8-0ut7uA_cfo-3MUe"
     return create_client(url, key)
@@ -47,7 +46,7 @@ def init_connection() -> Client:
 supabase = init_connection()
 
 # ---------------- Config & Paths Locais (E-mail/Cripto) ----------------
-APP_VERSION = "36.3 (Smart Import, UI Alignment, Enterprise AI & Model Fix)"
+APP_VERSION = "36.4 (Auto-Update Parte, Smart Import & AI Robustness)"
 INSTALL_DIR = Path("C:/GerenciadorProcessos")
 DATA_DIR = INSTALL_DIR / "data"
 
@@ -107,14 +106,24 @@ def load_config():
 
 CONFIG = load_config()
 
-# Inicializa o Gemini com o sufixo -latest para evitar erro 404 na API v1beta
-model = None
+# Configuração Base do Gemini
 if genai and CONFIG.get("gemini", {}).get("api_key"):
     try:
         genai.configure(api_key=CONFIG["gemini"]["api_key"])
-        model = genai.GenerativeModel('gemini-1.5-flash-latest')
     except Exception as e:
-        st.sidebar.error(f"Erro ao inicializar Gemini: {e}")
+        st.sidebar.error(f"Erro ao inicializar API do Google: {e}")
+
+# --- Motor de IA com Fallback Integrado ---
+def gerar_conteudo_ia(prompt):
+    """Tenta usar o modelo 1.5 Flash. Se der 404, cai para o modelo PRO universal."""
+    try:
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        return model.generate_content(prompt)
+    except Exception as e:
+        if '404' in str(e) or 'not found' in str(e).lower():
+            model_fallback = genai.GenerativeModel('gemini-pro')
+            return model_fallback.generate_content(prompt)
+        raise e
 
 # ---------------- Lógica de Negócios (CNJ, Permissões, PDF) ----------------
 def formatar_cnj(numero):
@@ -133,7 +142,7 @@ def verificar_acesso(email_usuario):
         return None
 
 def salvar_andamento(proc_num, desc):
-    """Função auxiliar para salvar histórico na base de dados"""
+    """Salva histórico na base de dados"""
     try:
         now_str = datetime.datetime.now().strftime("%d/%m/%Y %H:%M:%S")
         supabase.table("historico_pecas").insert({
@@ -145,7 +154,7 @@ def salvar_andamento(proc_num, desc):
         st.error(f"Erro ao salvar andamento: {e}")
 
 def get_historico(proc_num):
-    """Função auxiliar para buscar histórico de um processo"""
+    """Busca histórico de um processo"""
     try:
         res = supabase.table("historico_pecas").select("*").eq("numero_processo", proc_num).order("data_hora", desc=True).execute()
         return res.data
@@ -153,8 +162,8 @@ def get_historico(proc_num):
         return []
 
 def processar_pdf_movimentacao(uploaded_file):
-    if not model:
-        st.warning("Módulo Gemini não está habilitado ou a API Key não foi configurada.")
+    if not genai or not CONFIG.get("gemini", {}).get("api_key"):
+        st.warning("A API Key da Inteligência Artificial não foi configurada.")
         return None
         
     try:
@@ -168,17 +177,26 @@ def processar_pdf_movimentacao(uploaded_file):
         - resumo_movimentacao (texto resumido do evento)
         - possui_prazo (true ou false)
         - prazo_final (data se houver, ou texto vazio)
+        - nome_parte (nome completo da parte cliente, se identificado com clareza no documento. Se não encontrar, retorne vazio).
         
         Texto: {texto_pdf[:6000]}
         """
         
-        resposta_ia = model.generate_content(prompt)
+        resposta_ia = gerar_conteudo_ia(prompt)
         texto_resp = resposta_ia.text.replace('```json', '').replace('```', '').strip()
         dados_json = json.loads(texto_resp)
         
         num_processo = dados_json.get('numero_processo', '')
+        nome_extraido = dados_json.get('nome_parte', '')
+        
         if num_processo:
+            # 1. Salva o histórico
             salvar_andamento(num_processo, f"Movimentação Extraída (PDF): {dados_json.get('resumo_movimentacao', '')}")
+            
+            # 2. Atualiza a Parte automaticamente no banco se a IA encontrou o nome completo
+            if nome_extraido and len(nome_extraido.strip()) > 3:
+                supabase.table("processos").update({"parte": nome_extraido.strip()}).eq("numero", num_processo).execute()
+                st.toast(f"Nome da parte atualizado automaticamente para: {nome_extraido}")
         
         return dados_json
     except Exception as e:
@@ -270,10 +288,9 @@ def import_from_excel(uploaded_file):
     try:
         df_import = pd.read_excel(uploaded_file, engine='openpyxl')
         
-        # Normaliza os nomes das colunas (minúsculo e sem espaços sobrando) para facilitar o match
+        # Normaliza os nomes das colunas
         df_import.columns = [str(c).lower().strip() for c in df_import.columns]
         
-        # Verifica flexivelmente se existe uma coluna chave de CNJ/Número
         if "numero" not in df_import.columns and "número" not in df_import.columns and "cnj" not in df_import.columns:
             st.error("A planilha precisa ter pelo menos uma coluna chamada 'numero' ou 'cnj' para identificar os processos.")
             return False
@@ -283,14 +300,12 @@ def import_from_excel(uploaded_file):
         
         registros_limpos = []
         for reg in registros:
-            # Captura dinâmica da coluna de número
             num_raw = reg.get("numero", reg.get("número", reg.get("cnj", "")))
             if not num_raw: 
-                continue # Pula linhas vazias
+                continue 
                 
             num_formatado = formatar_cnj(str(num_raw))
             
-            # Captura dinâmica e segura das outras colunas com fallbacks
             registros_limpos.append({
                 "numero": num_formatado,
                 "tribunal": str(reg.get("tribunal", "TJ-SP")),
@@ -363,12 +378,10 @@ def read_publications_from_email():
             if proc_nums:
                 now_str = datetime.datetime.now().strftime("%Y-%m-%d")
                 for proc_num in set(proc_nums):
-                    # Atualiza o dashboard
                     supabase.table("processos").update(
                         {"marcado": "📩", "notif_data": now_str}
                     ).eq("numero", proc_num).execute()
                     
-                    # Salva o texto no histórico automaticamente
                     resumo = f"Publicação/Notificação via E-mail:\n{body[:800]}..."
                     salvar_andamento(proc_num, resumo)
                     processos_atualizados += 1
@@ -384,13 +397,13 @@ def read_publications_from_email():
         st.error(f"Falha de comunicação IMAP: {e}")
 
 def generate_piece(proc_num):
-    if not model:
+    if not genai or not CONFIG.get("gemini", {}).get("api_key"):
         st.info(f"Mockup Mode: Petição Inicial gerada simulada para o processo {proc_num} (Módulo Gemini desabilitado).")
         return
         
     try:
         prompt = f"Aja como um advogado sênior. Elabore uma Petição Inicial completa e estruturada para o processo {proc_num}. Não inclua resumos, gere a peça em sua totalidade abordando fatos, direito e pedidos de forma genérica para preenchimento posterior."
-        resposta = model.generate_content(prompt)
+        resposta = gerar_conteudo_ia(prompt)
         texto = resposta.text
         
         salvar_andamento(proc_num, "Petição Inicial (Gerada via IA - Gemini)")
@@ -451,7 +464,7 @@ if not st.session_state['authenticated']:
                             try:
                                 supabase.auth.reset_password_for_email(rec_email)
                                 st.session_state['recovery_email'] = rec_email 
-                                st.success("E-mail enviado! Verifique o código numérico na sua caixa de entrada (ou spam).")
+                                st.success("E-mail enviado! Verifique o código numérico na sua caixa de entrada.")
                             except Exception as e:
                                 st.error(f"Erro detalhado do Supabase: {e}")
                     else:
@@ -517,7 +530,7 @@ else:
         st.divider()
         
         if st.button("📧 Sincronizar Publicações (IMAP)", use_container_width=True):
-            with st.spinner("Varrendo caixa de entrada e aplicando IA..."):
+            with st.spinner("Varrendo caixa de entrada e aplicando automações..."):
                 read_publications_from_email()
                 st.rerun()
 
@@ -530,7 +543,7 @@ else:
                 st.markdown(msg["content"])
                 
         if prompt := st.chat_input("Pergunte sobre os processos..."):
-            if not model:
+            if not genai or not CONFIG.get("gemini", {}).get("api_key"):
                 st.error("Configure a API Key do Gemini em Configurações.")
             else:
                 st.session_state.messages.append({"role": "user", "content": prompt})
@@ -543,9 +556,18 @@ else:
                 with st.chat_message("assistant"):
                     with st.spinner("Consultando dados..."):
                         try:
-                            chat_sess = model.start_chat(history=[])
-                            prompt_completo = f"Você é o assistente jurídico GPAdv. Responda baseando-se NESTA tabela:\n{contexto_txt}\n\nPergunta: {prompt}"
-                            resposta = chat_sess.send_message(prompt_completo)
+                            # Tentativa de comunicação chat com Fallback Manual
+                            try:
+                                chat_sess = genai.GenerativeModel('gemini-1.5-flash').start_chat(history=[])
+                                prompt_completo = f"Você é o assistente jurídico GPAdv. Responda baseando-se NESTA tabela:\n{contexto_txt}\n\nPergunta: {prompt}"
+                                resposta = chat_sess.send_message(prompt_completo)
+                            except Exception as inner_e:
+                                if '404' in str(inner_e) or 'not found' in str(inner_e).lower():
+                                    chat_sess = genai.GenerativeModel('gemini-pro').start_chat(history=[])
+                                    resposta = chat_sess.send_message(prompt_completo)
+                                else:
+                                    raise inner_e
+                            
                             st.markdown(resposta.text)
                             st.session_state.messages.append({"role": "assistant", "content": resposta.text})
                         except Exception as e:
@@ -568,7 +590,6 @@ else:
             met3.metric("Em Andamento", len(df[df['situacao'].str.contains('Andamento', case=False, na=False)]))
 
         with st.container(border=True):
-            # Alinhamento vertical na base (bottom) resolve a assimetria visual dos botões
             col_search, col_export, col_import = st.columns([2, 1, 1], vertical_alignment="bottom")
             
             with col_search:
@@ -708,7 +729,7 @@ else:
     # ---------------- TAB 3: INTELIGÊNCIA DE PDF ----------------
     with tab_ia:
         st.subheader("🤖 Extrator de Movimentações (PDF)")
-        st.write("Faça o upload do documento. O Gemini lerá o PDF, identificará o processo, resumirá o teor e salvará automaticamente na Linha do Tempo.")
+        st.write("Faça o upload do documento. O Gemini lerá o PDF, identificará o processo, atualizará o nome da parte (se incompleto), resumirá o teor e salvará automaticamente na Linha do Tempo.")
         
         uploaded_pdf = st.file_uploader("Selecione o arquivo PDF", type=["pdf"])
         
