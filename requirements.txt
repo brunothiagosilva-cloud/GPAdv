@@ -6,4 +6,4 @@ openai
 openpyxl
 xlsxwriter
 pypdf
-google-generativeai
+google-generativeai>=0.5.4
