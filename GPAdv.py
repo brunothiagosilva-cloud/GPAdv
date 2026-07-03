@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # GPAdv_Web.py  —  "Meu Controle Jurídico" (Web / Supabase Enterprise)
-# Versão Unificada: 36.14 (Master-Detail UI, Controle de Leitura IMAP & Full-Text)
+# Versão Unificada: 36.15 (Protocol Column, Date Parsing & Grid Checkbox)
 # ------------------------------------------------------------------------------------
 
 import os
@@ -197,7 +197,6 @@ def processar_pdf_movimentacao(uploaded_file):
         if num_processo:
             salvar_andamento(num_processo, f"Movimentação Extraída (PDF): {dados_json.get('resumo_movimentacao', '')}")
             
-            # Atualiza o status para Não Lido no sistema
             supabase.table("processos").update({"marcado": "🔴 NÃO LIDO"}).eq("numero", num_processo).execute()
             
             if nome_extraido and len(nome_extraido.strip()) > 3:
@@ -253,7 +252,7 @@ def load_data():
     try:
         response = supabase.table("processos").select("*").order("id", desc=True).execute()
         if not response.data:
-            return pd.DataFrame(columns=["id", "numero", "tribunal", "parte", "situacao", "prazo", "observacoes", "marcado", "cor_card", "notif_data", "ultima_mov"])
+            return pd.DataFrame(columns=["id", "numero", "tribunal", "parte", "situacao", "prazo", "observacoes", "marcado", "cor_card", "notif_data", "ultima_mov", "ultimo_protocolo", "lido_check"])
             
         df_proc = pd.DataFrame(response.data)
         
@@ -261,18 +260,39 @@ def load_data():
         
         if hist_res.data:
             df_hist = pd.DataFrame(hist_res.data)
-            df_hist_latest = df_hist.drop_duplicates(subset=['numero_processo'], keep='first').copy()
-            # Removido o truncamento [:100] para disponibilizar o texto completo no painel
-            df_hist_latest['ultima_mov'] = df_hist_latest['data_hora'].str[:10] + " - " + df_hist_latest['descricao']
             
-            df_proc = pd.merge(df_proc, df_hist_latest[['numero_processo', 'ultima_mov']], left_on='numero', right_on='numero_processo', how='left')
+            # Inteligência de Extração de Data do texto
+            # Procura o primeiro padrão DD/MM/AAAA no texto da descrição
+            df_hist['data_extraida'] = df_hist['descricao'].str.extract(r'(\d{2}/\d{2}/\d{4})')
+            # Se achou uma data no texto, usa ela. Senão, usa a data_hora em que foi gravado no banco.
+            df_hist['data_exibicao'] = df_hist['data_extraida'].fillna(df_hist['data_hora'].str[:10])
+            
+            # Separa os históricos em "Protocolos" e "Demais Movimentações"
+            mask_protocolo = df_hist['descricao'].str.contains('Protocolo Eletrônico', case=False, na=False)
+            
+            # Processa a coluna de Protocolos
+            df_protocolos = df_hist[mask_protocolo].drop_duplicates(subset=['numero_processo'], keep='first').copy()
+            df_protocolos['ultimo_protocolo'] = df_protocolos['data_exibicao'] + " - " + df_protocolos['descricao']
+            
+            # Processa a coluna de Movimentações normais (tudo que não é protocolo)
+            df_outros = df_hist[~mask_protocolo].drop_duplicates(subset=['numero_processo'], keep='first').copy()
+            df_outros['ultima_mov'] = df_outros['data_exibicao'] + " - " + df_outros['descricao']
+            
+            # Merge das duas novas colunas na tabela principal
+            df_proc = pd.merge(df_proc, df_outros[['numero_processo', 'ultima_mov']], left_on='numero', right_on='numero_processo', how='left')
+            df_proc = pd.merge(df_proc, df_protocolos[['numero_processo', 'ultimo_protocolo']], left_on='numero', right_on='numero_processo', how='left')
+            
             df_proc['ultima_mov'] = df_proc['ultima_mov'].fillna('Sem histórico')
-            df_proc = df_proc.drop(columns=['numero_processo'])
+            df_proc['ultimo_protocolo'] = df_proc['ultimo_protocolo'].fillna('Sem protocolo')
+            df_proc = df_proc.drop(columns=['numero_processo'], errors='ignore')
         else:
             df_proc['ultima_mov'] = 'Sem histórico'
+            df_proc['ultimo_protocolo'] = 'Sem protocolo'
             
-        # Padroniza a coluna mercado caso esteja vazia
+        # Padroniza a coluna marcado para o Checkbox Dinâmico
         df_proc['marcado'] = df_proc['marcado'].replace('', '🟢 LIDO / OK')
+        # Cria uma coluna booleana baseada no status texto para o Checkbox funcionar
+        df_proc['lido_check'] = df_proc['marcado'] != '🔴 NÃO LIDO'
             
         return df_proc
     except Exception as e:
@@ -283,7 +303,7 @@ def load_data():
 def export_to_excel(df: pd.DataFrame) -> bytes:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df_export = df.drop(columns=['id', 'ultima_mov'], errors='ignore')
+        df_export = df.drop(columns=['id', 'ultima_mov', 'ultimo_protocolo', 'lido_check'], errors='ignore')
         df_export.to_excel(writer, index=False, sheet_name='Processos_GPAdv')
         workbook = writer.book
         worksheet = writer.sheets['Processos_GPAdv']
@@ -382,16 +402,14 @@ def read_publications_from_email():
             if proc_nums:
                 now_str = datetime.datetime.now().strftime("%Y-%m-%d")
                 for proc_num in set(proc_nums):
-                    # Salva no banco de dados e marca como NÃO LIDO no sistema
                     supabase.table("processos").update(
                         {"marcado": "🔴 NÃO LIDO", "notif_data": now_str}
                     ).eq("numero", proc_num).execute()
                     
-                    resumo = f"Publicação via E-mail:\n{body}"
+                    resumo = f"Publicação/Notificação via E-mail:\n{body}"
                     salvar_andamento(proc_num, resumo)
                     processos_atualizados += 1
             
-            # Marca o e-mail como LIDO no servidor IMAP (Gmail) para não baixar de novo amanhã
             M.uid('STORE', num.decode(), '+FLAGS', '(\\Seen)')
         
         M.logout()
@@ -533,7 +551,7 @@ else:
     
     with col_t1:
         st.title("⚖️ GPAdv")
-        st.caption("Versão Corporativa 36.14 (Master-Detail UI, Controle de Leitura IMAP & Full-Text)")
+        st.caption("Versão Corporativa 36.15 (Protocol Column, Date Parsing & Grid Checkbox)")
         
     with col_t2:
         if st.button("🔄 Atualizar Dados", use_container_width=True):
@@ -542,12 +560,11 @@ else:
     with col_t3:
         with st.popover("📜 Histórico de Versão", use_container_width=True):
             st.markdown("""
-            **Resumo de Funcionalidades (v36.14)**
-            * **Master-Detail UI:** Painel interativo abaixo do grid para visualizar detalhes de publicação na íntegra.
-            * **Controle de Leitura:** Nova coluna mapeando status 🔴 NÃO LIDO. Botão no painel para confirmar leitura.
-            * **Proteção IMAP e Marcação no Gmail:** E-mails lidos são marcados como \Seen no Google.
-            * **Importação Excel Aprimorada:** Captura colunas descrição automaticamente.
-            * **Métricas Dinâmicas e Auto-Refresh.**
+            **Resumo de Funcionalidades (v36.15)**
+            * **Checkbox de Leitura (NOVO):** Marque publicações como Lidas diretamente na caixinha da tabela principal.
+            * **Coluna de Protocolos (NOVO):** O sistema isola envios de Protocolo Eletrônico e-Saj em uma coluna separada.
+            * **Inteligência de Datas (NOVO):** A IA agora procura a data oficial do protocolo dentro do texto do e-mail.
+            * **Proteção IMAP:** E-mails lidos são marcados no Gmail para não repetir leitura.
             """)
 
     st.write("")
@@ -600,7 +617,7 @@ else:
                 met1, met2, met3 = st.columns(3)
                 titulo_total = "Total de Processos" if filtro_status == "Todos" else f"Total ({filtro_status})"
                 met1.metric(titulo_total, len(df_display))
-                met2.metric("Publicações Não Lidas", len(df_display[df_display['marcado'] == '🔴 NÃO LIDO']))
+                met2.metric("Publicações Não Lidas", len(df_display[~df_display['lido_check']]))
                 met3.metric("Em Andamento", len(df_display[df_display['situacao'].str.contains('Andamento', case=False, na=False)]))
             else:
                 met1, met2, met3 = st.columns(3)
@@ -615,7 +632,7 @@ else:
             else:
                 st.download_button(label="📥 Exportar Excel", data=b"", file_name="vazio.xlsx", disabled=True, use_container_width=True)
 
-        st.caption("Edição Inline: Dê um duplo clique para editar os dados. Clique nos cabeçalhos para ordenar. Selecione um processo no painel abaixo para ver o teor completo da publicação.")
+        st.caption("Edição Inline: Use o Checkbox (✔️) na coluna LIDO para marcar a leitura. Clique nos cabeçalhos para ordenar. Selecione um processo no painel abaixo para ver o teor completo.")
 
         if df_display.empty:
             st.info(f"Nenhum processo listado sob o filtro atual.")
@@ -626,11 +643,12 @@ else:
                 num_rows="dynamic",
                 hide_index=True,
                 column_config={
-                    "id": None, "cor_card": None, "notif_data": None,
+                    "id": None, "cor_card": None, "notif_data": None, "marcado": None, # Marcado original escondido
                     "numero": st.column_config.TextColumn("Número (CNJ)", required=True),
                     "situacao": st.column_config.SelectboxColumn("Status", options=["Em Andamento", "Arquivado", "Suspenso", "Concluído"]),
-                    "marcado": st.column_config.TextColumn("Status Publ.", disabled=True),
-                    "ultima_mov": st.column_config.TextColumn("Último Histórico", disabled=True, width="large"),
+                    "lido_check": st.column_config.CheckboxColumn("Leitura (Lido/Não Lido)", default=True),
+                    "ultima_mov": st.column_config.TextColumn("Última Publicação", disabled=True, width="large"),
+                    "ultimo_protocolo": st.column_config.TextColumn("Último Protocolo (e-Saj)", disabled=True, width="large"),
                 },
                 key="process_editor"
             )
@@ -642,8 +660,19 @@ else:
                 if changes.get("edited_rows"):
                     for row_idx_str, col_changes in changes["edited_rows"].items():
                         proc_id = df_display.iloc[int(row_idx_str)]["id"]
-                        supabase.table("processos").update(col_changes).eq("id", int(proc_id)).execute()
-                    needs_rerun = True
+                        
+                        # Se o usuário clicou no Checkbox, converte para o texto do Banco de Dados
+                        if "lido_check" in col_changes:
+                            db_marcado_val = "🟢 LIDO / OK" if col_changes["lido_check"] else "🔴 NÃO LIDO"
+                            supabase.table("processos").update({"marcado": db_marcado_val}).eq("id", int(proc_id)).execute()
+                            needs_rerun = True
+                            
+                        # Se alterou qualquer outra coluna, salva normal
+                        outras_mudancas = {k: v for k, v in col_changes.items() if k != "lido_check"}
+                        if outras_mudancas:
+                            supabase.table("processos").update(outras_mudancas).eq("id", int(proc_id)).execute()
+                            needs_rerun = True
+                            
                 if changes.get("deleted_rows"):
                     for row_idx in changes["deleted_rows"]:
                         proc_id = df_display.iloc[int(row_idx)]["id"]
@@ -659,18 +688,16 @@ else:
         
         # --- PAINEL DETALHADO DO PROCESSO (MASTER-DETAIL UI) ---
         st.write("### 🗂️ Painel Detalhado do Processo")
-        st.write("Selecione um processo na lista abaixo para visualizar a tela de informações, gerenciar publicações e gerar peças com Inteligência Artificial.")
+        st.write("Selecione um processo na lista abaixo para visualizar a tela de informações completas.")
         
         proc_list = df["numero"].tolist() if not df.empty else []
         proc_escolhido = st.selectbox("Abrir painel do processo:", proc_list, index=None, placeholder="Clique aqui para buscar ou selecionar o CNJ...")
         
         if proc_escolhido:
             with st.container(border=True):
-                # Busca as infos específicas do processo escolhido
                 dados_proc = df[df["numero"] == proc_escolhido].iloc[0]
                 hist_dados = get_historico(proc_escolhido)
                 
-                # Cabeçalho do Painel
                 col_p1, col_p2, col_p3 = st.columns([2, 1, 1])
                 col_p1.subheader(f"CNJ: {proc_escolhido}")
                 col_p2.write(f"**Parte:** {dados_proc['parte']}")
@@ -683,24 +710,11 @@ else:
                 with col_esq:
                     st.markdown("#### 📜 Histórico e Publicações")
                     if hist_dados:
-                        # Exibe a movimentação mais recente em destaque se estiver Não Lida
-                        if dados_proc['marcado'] == '🔴 NÃO LIDO':
-                            st.warning("⚠️ Você possui uma nova publicação não lida para este processo.")
-                            st.write(f"**Data da Publicação:** {hist_dados[0].get('data_hora', '')}")
-                            st.code(hist_dados[0].get('descricao', ''), language="text")
+                        if not dados_proc['lido_check']:
+                            st.warning("⚠️ Você possui uma nova publicação não lida para este processo. (Você pode marcar como Lida clicando na caixinha da tabela lá em cima).")
                             
-                            if st.button("✅ Marcar Publicação como Lida", use_container_width=True, type="primary"):
-                                supabase.table("processos").update({"marcado": "🟢 LIDO / OK"}).eq("numero", proc_escolhido).execute()
-                                st.rerun()
-                        else:
-                            st.success("✅ Todas as publicações deste processo foram lidas.")
-                            
-                        # Exibe o resto do histórico
                         st.markdown("**Movimentações Anteriores:**")
                         for idx, item in enumerate(hist_dados):
-                            # Se a primeira mov já foi exibida como alerta, pula.
-                            if idx == 0 and dados_proc['marcado'] == '🔴 NÃO LIDO':
-                                continue
                             with st.expander(f"🗓️ {item.get('data_hora', '')}"):
                                 st.write(item.get('descricao', ''))
                     else:
@@ -727,10 +741,8 @@ else:
                 if st.button("Salvar E-mail IMAP", type="primary"):
                     if email_imap and pwd_imap:
                         pwd_limpa = pwd_imap.replace(" ", "")
-                        
                         try:
                             busca = supabase.table("configuracoes").select("*").eq("usuario_email", st.session_state['user_email']).execute()
-                            
                             if busca.data:
                                 supabase.table("configuracoes").update({
                                     "imap_email": email_imap,
@@ -742,7 +754,6 @@ else:
                                     "imap_email": email_imap,
                                     "imap_pwd": pwd_limpa
                                 }).execute()
-                                
                             st.success("✅ Configurações IMAP vinculadas ao seu perfil com sucesso!")
                         except Exception as e:
                             erro_str = str(e)
@@ -759,10 +770,8 @@ else:
             st.write("Habilita o Chat Inteligente e a Leitura de PDF.")
             with st.container(border=True):
                 gemini_key = st.text_input("Sua Chave API (AIzaSy...)", value=CONFIG.get("gemini", {}).get("api_key", ""), type="password")
-                
                 if st.button("Habilitar Gemini AI", type="primary", use_container_width=True):
-                    if "gemini" not in CONFIG:
-                        CONFIG["gemini"] = {}
+                    if "gemini" not in CONFIG: CONFIG["gemini"] = {}
                     CONFIG["gemini"]["api_key"] = gemini_key
                     CONFIG["gemini"]["enabled"] = True if gemini_key else False
                     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
@@ -780,7 +789,6 @@ else:
             if st.session_state['pdf_json_result']:
                 st.success("✅ Dados extraídos e salvos no histórico com sucesso!")
                 st.json(st.session_state['pdf_json_result'])
-                
                 if st.button("Limpar e Processar Novo", type="secondary"):
                     st.session_state['pdf_json_result'] = None
                     st.rerun()
