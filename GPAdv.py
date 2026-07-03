@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # GPAdv_Web.py  —  "Meu Controle Jurídico" (Web / Supabase Enterprise)
-# Versão Unificada: 36.15 (Protocol Column, Date Parsing & Grid Checkbox)
+# Versão Unificada: 36.16 (Read-Only IMAP, Anti-Duplicidade, Protocol & Grid Checkbox)
 # ------------------------------------------------------------------------------------
 
 import os
@@ -261,24 +261,17 @@ def load_data():
         if hist_res.data:
             df_hist = pd.DataFrame(hist_res.data)
             
-            # Inteligência de Extração de Data do texto
-            # Procura o primeiro padrão DD/MM/AAAA no texto da descrição
             df_hist['data_extraida'] = df_hist['descricao'].str.extract(r'(\d{2}/\d{2}/\d{4})')
-            # Se achou uma data no texto, usa ela. Senão, usa a data_hora em que foi gravado no banco.
             df_hist['data_exibicao'] = df_hist['data_extraida'].fillna(df_hist['data_hora'].str[:10])
             
-            # Separa os históricos em "Protocolos" e "Demais Movimentações"
             mask_protocolo = df_hist['descricao'].str.contains('Protocolo Eletrônico', case=False, na=False)
             
-            # Processa a coluna de Protocolos
             df_protocolos = df_hist[mask_protocolo].drop_duplicates(subset=['numero_processo'], keep='first').copy()
             df_protocolos['ultimo_protocolo'] = df_protocolos['data_exibicao'] + " - " + df_protocolos['descricao']
             
-            # Processa a coluna de Movimentações normais (tudo que não é protocolo)
             df_outros = df_hist[~mask_protocolo].drop_duplicates(subset=['numero_processo'], keep='first').copy()
             df_outros['ultima_mov'] = df_outros['data_exibicao'] + " - " + df_outros['descricao']
             
-            # Merge das duas novas colunas na tabela principal
             df_proc = pd.merge(df_proc, df_outros[['numero_processo', 'ultima_mov']], left_on='numero', right_on='numero_processo', how='left')
             df_proc = pd.merge(df_proc, df_protocolos[['numero_processo', 'ultimo_protocolo']], left_on='numero', right_on='numero_processo', how='left')
             
@@ -289,9 +282,7 @@ def load_data():
             df_proc['ultima_mov'] = 'Sem histórico'
             df_proc['ultimo_protocolo'] = 'Sem protocolo'
             
-        # Padroniza a coluna marcado para o Checkbox Dinâmico
         df_proc['marcado'] = df_proc['marcado'].replace('', '🟢 LIDO / OK')
-        # Cria uma coluna booleana baseada no status texto para o Checkbox funcionar
         df_proc['lido_check'] = df_proc['marcado'] != '🔴 NÃO LIDO'
             
         return df_proc
@@ -375,6 +366,8 @@ def read_publications_from_email():
         M.login(imap_user, imap_pwd)
         M.select('"INBOX"')
         
+        # O sistema continuará buscando e-mails não lidos (UNSEEN).
+        # Porém, ele NÃO os marcará como lidos, para não alterar o Gmail do usuário.
         typ, data = M.search(None, '(UNSEEN)')
         if typ != 'OK' or not data[0]:
             st.info("Nenhuma mensagem não lida encontrada na caixa de entrada.")
@@ -402,21 +395,30 @@ def read_publications_from_email():
             if proc_nums:
                 now_str = datetime.datetime.now().strftime("%Y-%m-%d")
                 for proc_num in set(proc_nums):
-                    supabase.table("processos").update(
-                        {"marcado": "🔴 NÃO LIDO", "notif_data": now_str}
-                    ).eq("numero", proc_num).execute()
+                    resumo = f"Publicação via E-mail:\n{body}"
                     
-                    resumo = f"Publicação/Notificação via E-mail:\n{body}"
-                    salvar_andamento(proc_num, resumo)
-                    processos_atualizados += 1
+                    # --- BARREIRA ANTI-DUPLICIDADE DE BANCO DE DADOS ---
+                    # Verifica se esta publicação exata já existe no histórico do processo
+                    historico_existente = supabase.table("historico_pecas").select("descricao").eq("numero_processo", proc_num).execute()
+                    descricoes_existentes = [h.get('descricao', '') for h in historico_existente.data] if historico_existente.data else []
+                    
+                    # Só insere se for realmente uma publicação nova
+                    if resumo not in descricoes_existentes:
+                        supabase.table("processos").update(
+                            {"marcado": "🔴 NÃO LIDO", "notif_data": now_str}
+                        ).eq("numero", proc_num).execute()
+                        
+                        salvar_andamento(proc_num, resumo)
+                        processos_atualizados += 1
             
-            M.uid('STORE', num.decode(), '+FLAGS', '(\\Seen)')
+            # REMOVIDO: O comando que marcava o e-mail como \Seen foi removido
+            # garantindo acesso Somente Leitura (Read-Only) à caixa do usuário.
         
         M.logout()
         if processos_atualizados > 0:
-            st.success(f"{processos_atualizados} andamentos vinculados automaticamente via e-mail!")
+            st.success(f"{processos_atualizados} andamentos novos vinculados via e-mail!")
         else:
-            st.info("Nenhum número de processo correspondente encontrado nos e-mails lidos.")
+            st.info("Nenhuma publicação nova encontrada (E-mails lidos já estavam registrados no sistema).")
             
         return True
             
@@ -551,7 +553,7 @@ else:
     
     with col_t1:
         st.title("⚖️ GPAdv")
-        st.caption("Versão Corporativa 36.15 (Protocol Column, Date Parsing & Grid Checkbox)")
+        st.caption("Versão Corporativa 36.16 (Read-Only IMAP, Anti-Duplicidade, Protocol & Grid Checkbox)")
         
     with col_t2:
         if st.button("🔄 Atualizar Dados", use_container_width=True):
@@ -560,11 +562,12 @@ else:
     with col_t3:
         with st.popover("📜 Histórico de Versão", use_container_width=True):
             st.markdown("""
-            **Resumo de Funcionalidades (v36.15)**
-            * **Checkbox de Leitura (NOVO):** Marque publicações como Lidas diretamente na caixinha da tabela principal.
-            * **Coluna de Protocolos (NOVO):** O sistema isola envios de Protocolo Eletrônico e-Saj em uma coluna separada.
-            * **Inteligência de Datas (NOVO):** A IA agora procura a data oficial do protocolo dentro do texto do e-mail.
-            * **Proteção IMAP:** E-mails lidos são marcados no Gmail para não repetir leitura.
+            **Resumo de Funcionalidades (v36.16)**
+            * **Read-Only IMAP (NOVO):** O sistema apenas captura as informações e não altera mais o estado dos e-mails no Gmail do usuário.
+            * **Anti-Duplicidade de DB (NOVO):** Cruza textos antes de salvar para evitar repetições, mesmo mantendo os e-mails não lidos.
+            * **Checkbox de Leitura:** Marque publicações como Lidas diretamente na caixinha da tabela principal.
+            * **Coluna de Protocolos:** O sistema isola envios de Protocolo Eletrônico e-Saj em uma coluna separada.
+            * **Inteligência de Datas:** A IA agora procura a data oficial do protocolo dentro do texto do e-mail.
             """)
 
     st.write("")
@@ -632,7 +635,7 @@ else:
             else:
                 st.download_button(label="📥 Exportar Excel", data=b"", file_name="vazio.xlsx", disabled=True, use_container_width=True)
 
-        st.caption("Edição Inline: Use o Checkbox (✔️) na coluna LIDO para marcar a leitura. Clique nos cabeçalhos para ordenar. Selecione um processo no painel abaixo para ver o teor completo.")
+        st.caption("Edição Inline: Use o Checkbox (✔️) na coluna Leitura para gerenciar. Clique nos cabeçalhos para ordenar. Selecione um processo no painel abaixo para ver o teor completo.")
 
         if df_display.empty:
             st.info(f"Nenhum processo listado sob o filtro atual.")
@@ -643,7 +646,7 @@ else:
                 num_rows="dynamic",
                 hide_index=True,
                 column_config={
-                    "id": None, "cor_card": None, "notif_data": None, "marcado": None, # Marcado original escondido
+                    "id": None, "cor_card": None, "notif_data": None, "marcado": None,
                     "numero": st.column_config.TextColumn("Número (CNJ)", required=True),
                     "situacao": st.column_config.SelectboxColumn("Status", options=["Em Andamento", "Arquivado", "Suspenso", "Concluído"]),
                     "lido_check": st.column_config.CheckboxColumn("Leitura (Lido/Não Lido)", default=True),
@@ -661,13 +664,11 @@ else:
                     for row_idx_str, col_changes in changes["edited_rows"].items():
                         proc_id = df_display.iloc[int(row_idx_str)]["id"]
                         
-                        # Se o usuário clicou no Checkbox, converte para o texto do Banco de Dados
                         if "lido_check" in col_changes:
                             db_marcado_val = "🟢 LIDO / OK" if col_changes["lido_check"] else "🔴 NÃO LIDO"
                             supabase.table("processos").update({"marcado": db_marcado_val}).eq("id", int(proc_id)).execute()
                             needs_rerun = True
                             
-                        # Se alterou qualquer outra coluna, salva normal
                         outras_mudancas = {k: v for k, v in col_changes.items() if k != "lido_check"}
                         if outras_mudancas:
                             supabase.table("processos").update(outras_mudancas).eq("id", int(proc_id)).execute()
@@ -711,7 +712,7 @@ else:
                     st.markdown("#### 📜 Histórico e Publicações")
                     if hist_dados:
                         if not dados_proc['lido_check']:
-                            st.warning("⚠️ Você possui uma nova publicação não lida para este processo. (Você pode marcar como Lida clicando na caixinha da tabela lá em cima).")
+                            st.warning("⚠️ Você possui uma nova publicação não lida para este processo. (Marque como Lida clicando na caixinha da tabela acima).")
                             
                         st.markdown("**Movimentações Anteriores:**")
                         for idx, item in enumerate(hist_dados):
@@ -733,7 +734,7 @@ else:
         
         with col_conf1:
             st.subheader("⚙️ Integração de E-mail (IMAP)")
-            st.write("Configuração para o auto-save de publicações.")
+            st.write("Configuração para captura (Read-Only) de publicações.")
             with st.container(border=True):
                 email_imap = st.text_input("Seu E-mail Profissional (Ex: seuemail@gmail.com)")
                 pwd_imap = st.text_input("Senha de Aplicativo (App Password)", type="password")
