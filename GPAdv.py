@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # GPAdv_Web.py  —  "Meu Controle Jurídico" (Web / Supabase Enterprise)
-# Versão Unificada: 36.12 (IMAP Error Hold, Descricao Import Fix & RLS)
+# Versão Unificada: 36.14 (Master-Detail UI, Controle de Leitura IMAP & Full-Text)
 # ------------------------------------------------------------------------------------
 
 import os
@@ -158,7 +158,7 @@ def salvar_andamento(proc_num, desc):
         supabase.table("historico_pecas").insert({
             "numero_processo": proc_num,
             "data_hora": now_str,
-            "descricao": desc[:1500]
+            "descricao": desc
         }).execute()
     except Exception as e:
         st.error(f"Erro ao salvar andamento: {e}")
@@ -196,6 +196,9 @@ def processar_pdf_movimentacao(uploaded_file):
         
         if num_processo:
             salvar_andamento(num_processo, f"Movimentação Extraída (PDF): {dados_json.get('resumo_movimentacao', '')}")
+            
+            # Atualiza o status para Não Lido no sistema
+            supabase.table("processos").update({"marcado": "🔴 NÃO LIDO"}).eq("numero", num_processo).execute()
             
             if nome_extraido and len(nome_extraido.strip()) > 3:
                 supabase.table("processos").update({"parte": nome_extraido.strip()}).eq("numero", num_processo).execute()
@@ -259,13 +262,17 @@ def load_data():
         if hist_res.data:
             df_hist = pd.DataFrame(hist_res.data)
             df_hist_latest = df_hist.drop_duplicates(subset=['numero_processo'], keep='first').copy()
-            df_hist_latest['ultima_mov'] = df_hist_latest['data_hora'].str[:10] + " - " + df_hist_latest['descricao'].str[:100] + "..."
+            # Removido o truncamento [:100] para disponibilizar o texto completo no painel
+            df_hist_latest['ultima_mov'] = df_hist_latest['data_hora'].str[:10] + " - " + df_hist_latest['descricao']
             
             df_proc = pd.merge(df_proc, df_hist_latest[['numero_processo', 'ultima_mov']], left_on='numero', right_on='numero_processo', how='left')
             df_proc['ultima_mov'] = df_proc['ultima_mov'].fillna('Sem histórico')
             df_proc = df_proc.drop(columns=['numero_processo'])
         else:
             df_proc['ultima_mov'] = 'Sem histórico'
+            
+        # Padroniza a coluna mercado caso esteja vazia
+        df_proc['marcado'] = df_proc['marcado'].replace('', '🟢 LIDO / OK')
             
         return df_proc
     except Exception as e:
@@ -305,8 +312,6 @@ def import_from_excel(uploaded_file):
                 continue 
                 
             num_formatado = formatar_cnj(str(num_raw))
-            
-            # Adicionado mapeamento robusto para os campos descricao/observacoes
             campo_obs = str(reg.get("observacoes", reg.get("obs", reg.get("descricao", reg.get("descrição", "")))))
             
             registros_limpos.append({
@@ -316,7 +321,7 @@ def import_from_excel(uploaded_file):
                 "situacao": str(reg.get("situacao", str(reg.get("status", "Em Andamento")))),
                 "prazo": str(reg.get("prazo", "")),
                 "observacoes": campo_obs,
-                "marcado": "",
+                "marcado": "🟢 LIDO / OK",
                 "cor_card": "",
                 "notif_data": ""
             })
@@ -333,7 +338,6 @@ def import_from_excel(uploaded_file):
 
 # ---------------- Lógica de Negócios (Email & IA) ----------------
 def read_publications_from_email():
-    """Retorna True em caso de sucesso e False em caso de erro, evitando refresh indevido."""
     try:
         res = supabase.table("configuracoes").select("*").eq("usuario_email", st.session_state['user_email']).execute()
         if res.data and res.data[0].get("imap_email") and res.data[0].get("imap_pwd"):
@@ -343,7 +347,7 @@ def read_publications_from_email():
             st.warning("Configure suas credenciais de e-mail na aba '⚙️ Configurações Pessoais' antes de sincronizar publicações.")
             return False
     except Exception as e:
-        st.error(f"Erro ao buscar configurações de e-mail: {e}")
+        st.error("⚠️ Falha ao acessar configurações de e-mail no Banco de Dados.")
         return False
 
     try:
@@ -353,7 +357,7 @@ def read_publications_from_email():
         
         typ, data = M.search(None, '(UNSEEN)')
         if typ != 'OK' or not data[0]:
-            st.info("Nenhuma mensagem não lida encontrada na sua caixa de entrada.")
+            st.info("Nenhuma mensagem não lida encontrada na caixa de entrada.")
             M.logout()
             return True
 
@@ -378,13 +382,17 @@ def read_publications_from_email():
             if proc_nums:
                 now_str = datetime.datetime.now().strftime("%Y-%m-%d")
                 for proc_num in set(proc_nums):
+                    # Salva no banco de dados e marca como NÃO LIDO no sistema
                     supabase.table("processos").update(
-                        {"marcado": "📩", "notif_data": now_str}
+                        {"marcado": "🔴 NÃO LIDO", "notif_data": now_str}
                     ).eq("numero", proc_num).execute()
                     
-                    resumo = f"Publicação/Notificação via E-mail:\n{body[:800]}..."
+                    resumo = f"Publicação via E-mail:\n{body}"
                     salvar_andamento(proc_num, resumo)
                     processos_atualizados += 1
+            
+            # Marca o e-mail como LIDO no servidor IMAP (Gmail) para não baixar de novo amanhã
+            M.uid('STORE', num.decode(), '+FLAGS', '(\\Seen)')
         
         M.logout()
         if processos_atualizados > 0:
@@ -398,23 +406,6 @@ def read_publications_from_email():
         st.error(f"Falha de comunicação IMAP com o servidor de e-mail: {e}")
         st.info("Verifique se a 'Senha de Aplicativo' está correta nas Configurações Pessoais.")
         return False
-
-def generate_piece(proc_num):
-    try:
-        prompt = f"Aja como um advogado sênior. Elabore uma Petição Inicial completa e estruturada para o processo {proc_num}. Não inclua resumos, gere a peça em sua totalidade abordando fatos, direito e pedidos de forma genérica para preenchimento posterior."
-        resposta = gerar_conteudo_ia(prompt)
-        texto = resposta.text
-        
-        salvar_andamento(proc_num, "Petição Inicial (Gerada via IA - Gemini)")
-                         
-        st.success(f"Peça processual gerada para {proc_num} com sucesso!")
-        with st.expander("Visualizar Documento Gerado", expanded=True):
-            st.write(texto)
-            st.download_button("Baixar Texto (TXT)", data=texto, file_name=f"Petição_{proc_num}.txt", mime="text/plain")
-            
-    except Exception as e:
-        st.error(f"Erro na API do Gemini: {e}")
-
 
 # ==============================================================================
 # RENDERIZAÇÃO DA INTERFACE PRINCIPAL
@@ -500,7 +491,7 @@ else:
                 supabase.table("processos").insert({
                     "numero": num_formatado, "tribunal": "TJ-SP", "parte": new_parte, 
                     "situacao": "Em Andamento", "prazo": "", "observacoes": "", 
-                    "marcado": "", "cor_card": "", "notif_data": ""
+                    "marcado": "🟢 LIDO / OK", "cor_card": "", "notif_data": ""
                 }).execute()
                 st.success(f"Processo {num_formatado} cadastrado!")
                 st.rerun()
@@ -511,7 +502,7 @@ else:
             with st.spinner("Varrendo caixa de entrada..."):
                 resultado_imap = read_publications_from_email()
                 if resultado_imap:
-                    time.sleep(2) # Pausa dramática para o usuário ler a mensagem de sucesso
+                    time.sleep(2)
                     st.rerun()
 
         st.divider()
@@ -542,20 +533,21 @@ else:
     
     with col_t1:
         st.title("⚖️ GPAdv")
-        st.caption("Versão Corporativa 36.12 (IMAP Error Hold, Descricao Import Fix & RLS)")
+        st.caption("Versão Corporativa 36.14 (Master-Detail UI, Controle de Leitura IMAP & Full-Text)")
         
     with col_t2:
-        if st.button("🔄 Atualizar", use_container_width=True):
+        if st.button("🔄 Atualizar Dados", use_container_width=True):
             st.rerun()
             
     with col_t3:
         with st.popover("📜 Histórico de Versão", use_container_width=True):
             st.markdown("""
-            **Resumo de Funcionalidades (v36.12)**
-            * **Proteção IMAP:** Erros no e-mail não recarregam mais a tela para permitir a leitura do problema.
-            * **Ajuste Importação Excel:** As colunas "descrição" ou "descricao" da planilha agora preenchem automaticamente o campo Observações no banco.
-            * **Tratamento de RLS:** Sistema prevê bloqueios de segurança do Supabase.
-            * **Métricas Dinâmicas:** Painéis reagem em tempo real aos filtros.
+            **Resumo de Funcionalidades (v36.14)**
+            * **Master-Detail UI:** Painel interativo abaixo do grid para visualizar detalhes de publicação na íntegra.
+            * **Controle de Leitura:** Nova coluna mapeando status 🔴 NÃO LIDO. Botão no painel para confirmar leitura.
+            * **Proteção IMAP e Marcação no Gmail:** E-mails lidos são marcados como \Seen no Google.
+            * **Importação Excel Aprimorada:** Captura colunas descrição automaticamente.
+            * **Métricas Dinâmicas e Auto-Refresh.**
             """)
 
     st.write("")
@@ -608,12 +600,12 @@ else:
                 met1, met2, met3 = st.columns(3)
                 titulo_total = "Total de Processos" if filtro_status == "Todos" else f"Total ({filtro_status})"
                 met1.metric(titulo_total, len(df_display))
-                met2.metric("Com Publicação Recente", len(df_display[df_display['marcado'] == '📩']))
+                met2.metric("Publicações Não Lidas", len(df_display[df_display['marcado'] == '🔴 NÃO LIDO']))
                 met3.metric("Em Andamento", len(df_display[df_display['situacao'].str.contains('Andamento', case=False, na=False)]))
             else:
                 met1, met2, met3 = st.columns(3)
                 met1.metric("Total de Processos", 0)
-                met2.metric("Com Publicação Recente", 0)
+                met2.metric("Publicações Não Lidas", 0)
                 met3.metric("Em Andamento", 0)
 
         with export_placeholder:
@@ -623,7 +615,7 @@ else:
             else:
                 st.download_button(label="📥 Exportar Excel", data=b"", file_name="vazio.xlsx", disabled=True, use_container_width=True)
 
-        st.caption("Edição Inline: Dê um duplo clique para editar. Nova coluna 'Último Histórico' exibe a movimentação mais recente.")
+        st.caption("Edição Inline: Dê um duplo clique para editar os dados. Clique nos cabeçalhos para ordenar. Selecione um processo no painel abaixo para ver o teor completo da publicação.")
 
         if df_display.empty:
             st.info(f"Nenhum processo listado sob o filtro atual.")
@@ -637,6 +629,7 @@ else:
                     "id": None, "cor_card": None, "notif_data": None,
                     "numero": st.column_config.TextColumn("Número (CNJ)", required=True),
                     "situacao": st.column_config.SelectboxColumn("Status", options=["Em Andamento", "Arquivado", "Suspenso", "Concluído"]),
+                    "marcado": st.column_config.TextColumn("Status Publ.", disabled=True),
                     "ultima_mov": st.column_config.TextColumn("Último Histórico", disabled=True, width="large"),
                 },
                 key="process_editor"
@@ -651,7 +644,6 @@ else:
                         proc_id = df_display.iloc[int(row_idx_str)]["id"]
                         supabase.table("processos").update(col_changes).eq("id", int(proc_id)).execute()
                     needs_rerun = True
-                    
                 if changes.get("deleted_rows"):
                     for row_idx in changes["deleted_rows"]:
                         proc_id = df_display.iloc[int(row_idx)]["id"]
@@ -665,30 +657,61 @@ else:
 
         st.divider()
         
-        st.write("### 📜 Linha do Tempo & Engenharia Jurídica (IA)")
-        col_hist, col_ai = st.columns([2, 1])
-
-        with col_hist:
-            proc_list = df["numero"].tolist() if not df.empty else []
-            proc_escolhido = st.selectbox("Selecione um processo para visualizar o histórico completo:", proc_list)
-            
-            if proc_escolhido:
+        # --- PAINEL DETALHADO DO PROCESSO (MASTER-DETAIL UI) ---
+        st.write("### 🗂️ Painel Detalhado do Processo")
+        st.write("Selecione um processo na lista abaixo para visualizar a tela de informações, gerenciar publicações e gerar peças com Inteligência Artificial.")
+        
+        proc_list = df["numero"].tolist() if not df.empty else []
+        proc_escolhido = st.selectbox("Abrir painel do processo:", proc_list, index=None, placeholder="Clique aqui para buscar ou selecionar o CNJ...")
+        
+        if proc_escolhido:
+            with st.container(border=True):
+                # Busca as infos específicas do processo escolhido
+                dados_proc = df[df["numero"] == proc_escolhido].iloc[0]
                 hist_dados = get_historico(proc_escolhido)
-                if hist_dados:
-                    for item in hist_dados:
-                        with st.expander(f"🗓️ {item.get('data_hora', '')} - Visualizar Teor"):
-                            st.write(item.get('descricao', ''))
-                else:
-                    st.info("Ainda não há movimentações registradas (via E-mail ou PDF) para este processo.")
-
-        with col_ai:
-            st.write("<br>", unsafe_allow_html=True)
-            if proc_escolhido:
-                if st.button("Gerar Petição Inicial (IA)", type="primary", use_container_width=True):
-                    with st.spinner("Processando lógica jurídica..."):
-                        generate_piece(proc_escolhido)
-            else:
-                st.warning("Selecione um processo ao lado para redigir a peça.")
+                
+                # Cabeçalho do Painel
+                col_p1, col_p2, col_p3 = st.columns([2, 1, 1])
+                col_p1.subheader(f"CNJ: {proc_escolhido}")
+                col_p2.write(f"**Parte:** {dados_proc['parte']}")
+                col_p3.write(f"**Status:** {dados_proc['situacao']}")
+                
+                st.divider()
+                
+                col_esq, col_dir = st.columns([1.5, 1])
+                
+                with col_esq:
+                    st.markdown("#### 📜 Histórico e Publicações")
+                    if hist_dados:
+                        # Exibe a movimentação mais recente em destaque se estiver Não Lida
+                        if dados_proc['marcado'] == '🔴 NÃO LIDO':
+                            st.warning("⚠️ Você possui uma nova publicação não lida para este processo.")
+                            st.write(f"**Data da Publicação:** {hist_dados[0].get('data_hora', '')}")
+                            st.code(hist_dados[0].get('descricao', ''), language="text")
+                            
+                            if st.button("✅ Marcar Publicação como Lida", use_container_width=True, type="primary"):
+                                supabase.table("processos").update({"marcado": "🟢 LIDO / OK"}).eq("numero", proc_escolhido).execute()
+                                st.rerun()
+                        else:
+                            st.success("✅ Todas as publicações deste processo foram lidas.")
+                            
+                        # Exibe o resto do histórico
+                        st.markdown("**Movimentações Anteriores:**")
+                        for idx, item in enumerate(hist_dados):
+                            # Se a primeira mov já foi exibida como alerta, pula.
+                            if idx == 0 and dados_proc['marcado'] == '🔴 NÃO LIDO':
+                                continue
+                            with st.expander(f"🗓️ {item.get('data_hora', '')}"):
+                                st.write(item.get('descricao', ''))
+                    else:
+                        st.info("Ainda não há movimentações ou publicações registradas para este processo.")
+                
+                with col_dir:
+                    st.markdown("#### 🤖 Engenharia Jurídica (IA)")
+                    st.write("Utilize a inteligência artificial para redigir documentos iniciais com base nos dados deste processo.")
+                    if st.button("Gerar Petição Inicial", type="primary", use_container_width=True):
+                        with st.spinner("Processando lógica jurídica..."):
+                            generate_piece(proc_escolhido)
 
     # ---------------- TAB 2: CONFIGURAÇÕES PESSOAIS ----------------
     with tab_config:
