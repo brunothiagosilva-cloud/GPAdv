@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # GPAdv_Web.py  —  "Meu Controle Jurídico" (Web / Supabase Enterprise)
-# Versão Unificada: 36.16 (Read-Only IMAP, Anti-Duplicidade, Protocol & Grid Checkbox)
+# Versão Unificada: 36.17 (Grid Sorting Enabled, Safe Delete Action & Read-Only IMAP)
 # ------------------------------------------------------------------------------------
 
 import os
@@ -366,8 +366,6 @@ def read_publications_from_email():
         M.login(imap_user, imap_pwd)
         M.select('"INBOX"')
         
-        # O sistema continuará buscando e-mails não lidos (UNSEEN).
-        # Porém, ele NÃO os marcará como lidos, para não alterar o Gmail do usuário.
         typ, data = M.search(None, '(UNSEEN)')
         if typ != 'OK' or not data[0]:
             st.info("Nenhuma mensagem não lida encontrada na caixa de entrada.")
@@ -397,12 +395,9 @@ def read_publications_from_email():
                 for proc_num in set(proc_nums):
                     resumo = f"Publicação via E-mail:\n{body}"
                     
-                    # --- BARREIRA ANTI-DUPLICIDADE DE BANCO DE DADOS ---
-                    # Verifica se esta publicação exata já existe no histórico do processo
                     historico_existente = supabase.table("historico_pecas").select("descricao").eq("numero_processo", proc_num).execute()
                     descricoes_existentes = [h.get('descricao', '') for h in historico_existente.data] if historico_existente.data else []
                     
-                    # Só insere se for realmente uma publicação nova
                     if resumo not in descricoes_existentes:
                         supabase.table("processos").update(
                             {"marcado": "🔴 NÃO LIDO", "notif_data": now_str}
@@ -411,9 +406,6 @@ def read_publications_from_email():
                         salvar_andamento(proc_num, resumo)
                         processos_atualizados += 1
             
-            # REMOVIDO: O comando que marcava o e-mail como \Seen foi removido
-            # garantindo acesso Somente Leitura (Read-Only) à caixa do usuário.
-        
         M.logout()
         if processos_atualizados > 0:
             st.success(f"{processos_atualizados} andamentos novos vinculados via e-mail!")
@@ -553,7 +545,7 @@ else:
     
     with col_t1:
         st.title("⚖️ GPAdv")
-        st.caption("Versão Corporativa 36.16 (Read-Only IMAP, Anti-Duplicidade, Protocol & Grid Checkbox)")
+        st.caption("Versão Corporativa 36.17 (Grid Sorting Enabled, Safe Delete Action & Read-Only IMAP)")
         
     with col_t2:
         if st.button("🔄 Atualizar Dados", use_container_width=True):
@@ -562,12 +554,12 @@ else:
     with col_t3:
         with st.popover("📜 Histórico de Versão", use_container_width=True):
             st.markdown("""
-            **Resumo de Funcionalidades (v36.16)**
-            * **Read-Only IMAP (NOVO):** O sistema apenas captura as informações e não altera mais o estado dos e-mails no Gmail do usuário.
-            * **Anti-Duplicidade de DB (NOVO):** Cruza textos antes de salvar para evitar repetições, mesmo mantendo os e-mails não lidos.
-            * **Checkbox de Leitura:** Marque publicações como Lidas diretamente na caixinha da tabela principal.
-            * **Coluna de Protocolos:** O sistema isola envios de Protocolo Eletrônico e-Saj em uma coluna separada.
-            * **Inteligência de Datas:** A IA agora procura a data oficial do protocolo dentro do texto do e-mail.
+            **Resumo de Funcionalidades (v36.17)**
+            * **Ordenação Liberada (NOVO):** Clique nos cabeçalhos da tabela para ordenar A-Z ou Z-A.
+            * **Exclusão Segura (NOVO):** A ação de excluir processo foi movida para o Painel Detalhado para evitar acidentes e permitir a ordenação.
+            * **Read-Only IMAP:** O sistema apenas captura as informações e não altera mais o estado dos e-mails no Gmail do usuário.
+            * **Anti-Duplicidade de DB:** Cruza textos antes de salvar para evitar repetições.
+            * **Checkbox de Leitura:** Marque publicações como Lidas na tabela principal.
             """)
 
     st.write("")
@@ -635,15 +627,15 @@ else:
             else:
                 st.download_button(label="📥 Exportar Excel", data=b"", file_name="vazio.xlsx", disabled=True, use_container_width=True)
 
-        st.caption("Edição Inline: Use o Checkbox (✔️) na coluna Leitura para gerenciar. Clique nos cabeçalhos para ordenar. Selecione um processo no painel abaixo para ver o teor completo.")
+        st.caption("Edição Inline: Use o Checkbox (✔️) na coluna Leitura para gerenciar. Clique nos cabeçalhos para ORDENAR. Selecione um processo no painel abaixo para ações avançadas.")
 
         if df_display.empty:
             st.info(f"Nenhum processo listado sob o filtro atual.")
         else:
+            # Remoção do num_rows="dynamic" para habilitar a ordenação por clique nos cabeçalhos
             edited_df = st.data_editor(
                 df_display,
                 use_container_width=True,
-                num_rows="dynamic",
                 hide_index=True,
                 column_config={
                     "id": None, "cor_card": None, "notif_data": None, "marcado": None,
@@ -674,12 +666,6 @@ else:
                             supabase.table("processos").update(outras_mudancas).eq("id", int(proc_id)).execute()
                             needs_rerun = True
                             
-                if changes.get("deleted_rows"):
-                    for row_idx in changes["deleted_rows"]:
-                        proc_id = df_display.iloc[int(row_idx)]["id"]
-                        supabase.table("processos").delete().eq("id", int(proc_id)).execute()
-                    needs_rerun = True
-
                 if needs_rerun:
                     st.toast("✅ Banco de dados atualizado com sucesso!")
                     del st.session_state["process_editor"]
@@ -689,7 +675,7 @@ else:
         
         # --- PAINEL DETALHADO DO PROCESSO (MASTER-DETAIL UI) ---
         st.write("### 🗂️ Painel Detalhado do Processo")
-        st.write("Selecione um processo na lista abaixo para visualizar a tela de informações completas.")
+        st.write("Selecione um processo na lista abaixo para visualizar a tela de informações e realizar ações avançadas.")
         
         proc_list = df["numero"].tolist() if not df.empty else []
         proc_escolhido = st.selectbox("Abrir painel do processo:", proc_list, index=None, placeholder="Clique aqui para buscar ou selecionar o CNJ...")
@@ -723,10 +709,20 @@ else:
                 
                 with col_dir:
                     st.markdown("#### 🤖 Engenharia Jurídica (IA)")
-                    st.write("Utilize a inteligência artificial para redigir documentos iniciais com base nos dados deste processo.")
+                    st.write("Utilize a IA para redigir documentos iniciais.")
                     if st.button("Gerar Petição Inicial", type="primary", use_container_width=True):
                         with st.spinner("Processando lógica jurídica..."):
                             generate_piece(proc_escolhido)
+                            
+                    st.write("")
+                    st.markdown("#### ⚙️ Ações do Processo")
+                    st.write("Remoção permanente deste processo do banco de dados.")
+                    if st.button("🗑️ Excluir Processo Permanentemente", type="secondary", use_container_width=True):
+                        supabase.table("processos").delete().eq("numero", proc_escolhido).execute()
+                        supabase.table("historico_pecas").delete().eq("numero_processo", proc_escolhido).execute()
+                        st.success("Processo excluído com sucesso!")
+                        time.sleep(1)
+                        st.rerun()
 
     # ---------------- TAB 2: CONFIGURAÇÕES PESSOAIS ----------------
     with tab_config:
