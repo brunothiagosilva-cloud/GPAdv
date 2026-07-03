@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # GPAdv_Web.py  —  "Meu Controle Jurídico" (Web / Supabase Enterprise)
-# Versão Unificada: 36.11 (RLS Error Handling, Database Fixes & Auto-Discovery)
+# Versão Unificada: 36.12 (IMAP Error Hold, Descricao Import Fix & RLS)
 # ------------------------------------------------------------------------------------
 
 import os
@@ -305,13 +305,17 @@ def import_from_excel(uploaded_file):
                 continue 
                 
             num_formatado = formatar_cnj(str(num_raw))
+            
+            # Adicionado mapeamento robusto para os campos descricao/observacoes
+            campo_obs = str(reg.get("observacoes", reg.get("obs", reg.get("descricao", reg.get("descrição", "")))))
+            
             registros_limpos.append({
                 "numero": num_formatado,
                 "tribunal": str(reg.get("tribunal", "TJ-SP")),
                 "parte": str(reg.get("parte", str(reg.get("cliente", "")))),
                 "situacao": str(reg.get("situacao", str(reg.get("status", "Em Andamento")))),
                 "prazo": str(reg.get("prazo", "")),
-                "observacoes": str(reg.get("observacoes", str(reg.get("obs", "")))),
+                "observacoes": campo_obs,
                 "marcado": "",
                 "cor_card": "",
                 "notif_data": ""
@@ -329,6 +333,7 @@ def import_from_excel(uploaded_file):
 
 # ---------------- Lógica de Negócios (Email & IA) ----------------
 def read_publications_from_email():
+    """Retorna True em caso de sucesso e False em caso de erro, evitando refresh indevido."""
     try:
         res = supabase.table("configuracoes").select("*").eq("usuario_email", st.session_state['user_email']).execute()
         if res.data and res.data[0].get("imap_email") and res.data[0].get("imap_pwd"):
@@ -336,10 +341,10 @@ def read_publications_from_email():
             imap_pwd = res.data[0]["imap_pwd"]
         else:
             st.warning("Configure suas credenciais de e-mail na aba '⚙️ Configurações Pessoais' antes de sincronizar publicações.")
-            return
+            return False
     except Exception as e:
         st.error(f"Erro ao buscar configurações de e-mail: {e}")
-        return
+        return False
 
     try:
         M = imaplib.IMAP4_SSL("imap.gmail.com", 993)
@@ -348,9 +353,9 @@ def read_publications_from_email():
         
         typ, data = M.search(None, '(UNSEEN)')
         if typ != 'OK' or not data[0]:
-            st.info("Nenhuma mensagem não lida encontrada.")
+            st.info("Nenhuma mensagem não lida encontrada na sua caixa de entrada.")
             M.logout()
-            return
+            return True
 
         regex = re.compile(r"\b\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}\b")
         processos_atualizados = 0
@@ -385,10 +390,14 @@ def read_publications_from_email():
         if processos_atualizados > 0:
             st.success(f"{processos_atualizados} andamentos vinculados automaticamente via e-mail!")
         else:
-            st.info("Nenhum número de processo correspondente encontrado nos e-mails.")
+            st.info("Nenhum número de processo correspondente encontrado nos e-mails lidos.")
+            
+        return True
             
     except Exception as e:
         st.error(f"Falha de comunicação IMAP com o servidor de e-mail: {e}")
+        st.info("Verifique se a 'Senha de Aplicativo' está correta nas Configurações Pessoais.")
+        return False
 
 def generate_piece(proc_num):
     try:
@@ -500,8 +509,10 @@ else:
         
         if st.button("📧 Sincronizar Publicações (IMAP)", use_container_width=True):
             with st.spinner("Varrendo caixa de entrada..."):
-                read_publications_from_email()
-                st.rerun()
+                resultado_imap = read_publications_from_email()
+                if resultado_imap:
+                    time.sleep(2) # Pausa dramática para o usuário ler a mensagem de sucesso
+                    st.rerun()
 
         st.divider()
 
@@ -531,7 +542,7 @@ else:
     
     with col_t1:
         st.title("⚖️ GPAdv")
-        st.caption("Versão Corporativa 36.11 (RLS Error Handling, Database Fixes & Auto-Discovery)")
+        st.caption("Versão Corporativa 36.12 (IMAP Error Hold, Descricao Import Fix & RLS)")
         
     with col_t2:
         if st.button("🔄 Atualizar", use_container_width=True):
@@ -540,12 +551,11 @@ else:
     with col_t3:
         with st.popover("📜 Histórico de Versão", use_container_width=True):
             st.markdown("""
-            **Resumo de Funcionalidades (v36.11)**
-            * **Tratamento de RLS (NOVO):** Sistema prevê bloqueios de segurança de linha (Row Level Security) do Supabase e instrui a solução.
-            * **Integração IMAP Resiliente:** Sistema grava as credenciais bypassando exigências estritas e remove espaços da senha automaticamente.
-            * **Métricas Dinâmicas:** Os painéis reagem em tempo real aos filtros aplicados na tela.
-            * **Exportação Contextual:** Botão Excel exporta apenas os dados filtrados.
-            * **Auto-Refresh Inteligente:** Recarregamento automatizado de tela após ações.
+            **Resumo de Funcionalidades (v36.12)**
+            * **Proteção IMAP:** Erros no e-mail não recarregam mais a tela para permitir a leitura do problema.
+            * **Ajuste Importação Excel:** As colunas "descrição" ou "descricao" da planilha agora preenchem automaticamente o campo Observações no banco.
+            * **Tratamento de RLS:** Sistema prevê bloqueios de segurança do Supabase.
+            * **Métricas Dinâmicas:** Painéis reagem em tempo real aos filtros.
             """)
 
     st.write("")
